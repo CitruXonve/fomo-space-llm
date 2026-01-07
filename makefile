@@ -24,3 +24,6 @@ redis-down:
 
 redis-test:
 	docker exec -it redis-server redis-cli
+
+debug:
+	fastapi dev src/main.py --reload

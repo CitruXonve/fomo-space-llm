@@ -9,7 +9,6 @@ import logging
 from typing import TypeAlias
 from src.type.enums import ContentFormat
 
-
 logger = logging.getLogger(__name__)
 
 Section: TypeAlias = tuple[str, str]  # (heading, content)
@@ -100,6 +99,69 @@ class PDFParser(FileParser):
     def get_format(self) -> ContentFormat:
         return ContentFormat.PDF
 
+    def _is_header_footer_line(self, line: str) -> bool:
+        """Detect if a line is likely a header or footer based on patterns"""
+        line_stripped = line.strip()
+
+        # Skip empty lines
+        if not line_stripped:
+            return True
+
+        # Pattern 1: Date/time stamps (e.g., "12/30/25, 3:02 PM")
+        date_time_pattern = r'\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}\s*[AP]M'
+        if re.search(date_time_pattern, line_stripped, re.IGNORECASE):
+            return True
+
+        # Pattern 2: URLs (http:// or https://)
+        if re.match(r'https?://', line_stripped):
+            return True
+
+        # Pattern 3: Page numbers (e.g., "1/28", "2/28")
+        page_number_pattern = r'^\d+/\d+$'
+        if re.match(page_number_pattern, line_stripped):
+            return True
+
+        # Pattern 4: Short lines that are likely site names/headers (< 60 chars with | separator)
+        if len(line_stripped) < 60 and '|' in line_stripped:
+            return True
+
+        return False
+
+    def _filter_repeated_lines(self, sections_dict: dict, threshold: float = 0.3) -> dict:
+        """Filter out lines that appear in many pages (likely headers/footers)
+
+        Args:
+            sections_dict: Dictionary mapping page labels to lists of text lines
+            threshold: If a line appears in more than this fraction of pages, remove it
+        """
+        from collections import Counter
+
+        # Count occurrences of each line across all pages
+        line_counts = Counter()
+        total_pages = len(sections_dict)
+
+        for lines in sections_dict.values():
+            unique_lines = set(line.strip() for line in lines)
+            line_counts.update(unique_lines)
+
+        # Identify lines that appear too frequently (likely headers/footers)
+        repeated_lines = {
+            line for line, count in line_counts.items()
+            if count / total_pages > threshold and len(line.strip()) < 100
+        }
+
+        # Filter out repeated lines from each page
+        filtered_dict = {}
+        for page_label, lines in sections_dict.items():
+            filtered_lines = [
+                line for line in lines
+                if line.strip() not in repeated_lines
+            ]
+            if filtered_lines:  # Only keep pages with content
+                filtered_dict[page_label] = filtered_lines
+
+        return filtered_dict
+
     def parse(self, file_path: Path) -> list[Section]:
         """Parse PDF into sections"""
         from langchain_community.document_loaders import PyMuPDFLoader
@@ -128,7 +190,17 @@ class PDFParser(FileParser):
             page_label = f"Page Label {doc.metadata.get('page', 'Unknown')}"
             text_lines = [text.lstrip()
                           for text in section.split('\n') if text.lstrip()]
-            sections_dict[page_label].extend(text_lines)
+
+            # Filter out header/footer lines based on patterns
+            filtered_lines = [
+                line for line in text_lines
+                if not self._is_header_footer_line(line)
+            ]
+
+            sections_dict[page_label].extend(filtered_lines)
+
+        # Filter out repeated lines across pages (likely headers/footers)
+        sections_dict = self._filter_repeated_lines(sections_dict)
 
         # Convert dict to list of tuples, maintaining insertion order
         sections = [(page_label, lines)
@@ -169,7 +241,7 @@ class TextParser(FileParser):
         current_content = []
 
         for i, line in enumerate(lines):
-            # Check for Pattern 1 - underlined headings: Lines with "===" or "---" underlines
+            # Check for underlined headings
             if i > 0 and re.match(r'^[=\-]{3,}$', line.strip()):
                 # Previous line is the heading
                 if current_heading and current_content:
@@ -180,7 +252,7 @@ class TextParser(FileParser):
                 current_content = []
                 continue
 
-            # Check for Pattern 2 - numbered sections: Lines starting with numbers (1. 2. etc.)
+            # Check for numbered sections
             numbered_match = re.match(r'^(\d+)\.\s+(.+)$', line.strip())
             if numbered_match and len(line.strip()) < 100:
                 if current_heading and current_content:

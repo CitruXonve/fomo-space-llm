@@ -60,11 +60,11 @@ poetry env info
 Resolve dependencies via `poetry`:
 
 ```bash
+poetry install # first-time only
 poetry update
-poetry install
 ```
 
-Optional: in case of the error ` pyproject.toml changed significantly since poetry.lock was last generated. Run ``poetry lock`` to fix the lock file. `
+Optional: in case of the error ` pyproject.toml changed significantly since poetry.lock was last generated. Run ``poetry lock`` to fix the lock file.  `
 
 ```bash
 poetry lock
@@ -118,9 +118,11 @@ The default semantic embedding model for this project is [`all-MiniLM-L6-v2`](ht
 
 ## TODOs
 
-- Support for various input file formats and multi-media parsing
-- MCP-based integration with OneNote etc.
-- Streaming responses via tokenization and server-sent events (SSE)
-- DB storage of sessions instead of in-memory
-- Fine-tuning on models, chunking and embedding
-- Containerization preparation
+- [ ] Design pattern & strategy: OOP, Separation of Concerns, modularization, boundaries between microservices
+- [ ] Support for various input file formats and multi-media parsing
+- [ ] MCP-based integration with OneNote etc.
+- [x] Streaming responses via tokenization and server-sent events (SSE)
+- [ ] DB storage of sessions instead of in-memory
+- [ ] LLM Steering VS Fine-tuning on models, chunking and embedding
+- [ ] Containerization preparation
+- [ ] Dataflow/Workflow orchestration

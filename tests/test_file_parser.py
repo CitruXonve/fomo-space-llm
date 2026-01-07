@@ -30,7 +30,7 @@ class TestFileParser(unittest.TestCase):
         sections = self.parser_factory.parse_file(Path(pdf_path))
         self.assertGreater(len(sections), 0)
         print(f"Sections from {format.value}:",
-              len(sections[-1]), sections[-1][:50])
+              len(sections[0]), sections[0][:50])
 
         with open(settings.EXPORT_DIRECTORY + "/sections_case1.json", "w") as f:
             json.dump(sections, f, indent=4)
