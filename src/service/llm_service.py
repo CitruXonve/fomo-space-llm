@@ -119,7 +119,7 @@ class ClaudeLLMService(LLMService):
         self.agent = create_agent(
             model=ChatAnthropic(
                 model=settings.CLAUDE_MODEL,
-                temperature=0.7,  # Balanced - not too creative, not too rigid
+                temperature=settings.CLAUDE_TEMPERATURE,
                 max_tokens=settings.CLAUDE_MAX_TOKENS
             ),
             middleware=[build_prompt], context_schema=PromptContext)

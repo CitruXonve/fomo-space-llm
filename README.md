@@ -46,6 +46,15 @@ This is to set up a virtual environment in the project directory:
 
 ```bash
 python -m venv .venv
+source .venv/bin/activate
+```
+
+([Read more](https://share.google/aimode/07EdicDMsIzbsvX2p))
+
+Validate the virtual environment via `poetry`:
+
+```bash
+poetry env info
 ```
 
 Resolve dependencies via `poetry`:

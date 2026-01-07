@@ -18,6 +18,9 @@ class Settings(BaseSettings):
         project_root, '.knowledge_sources')
     KB_POST_TTL: int = 3600 * 24 * 7  # 7 days
 
+    # Export settings
+    EXPORT_DIRECTORY: str = os.path.join(project_root, '.export')
+
     # Embedding model settings
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"  # 384-dimensional, fast, good for FAQ
     EMBEDDING_MODEL_CACHE_DIR: str = os.path.join(project_root, '.models')

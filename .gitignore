@@ -3,8 +3,8 @@
 # Knowledge sources
 .knowledge_sources/
 
-# Output
-output/
+# Export
+.export/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
