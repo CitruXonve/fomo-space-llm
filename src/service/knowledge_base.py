@@ -491,3 +491,6 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
             f"Search query: '{query}' - Found {len(results)} relevant chunks")
 
         return results
+
+if __name__ == "__main__":
+    KnowledgeBaseServiceMarkdown()

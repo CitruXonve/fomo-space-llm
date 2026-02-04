@@ -298,3 +298,12 @@ class ParserFactory:
 
         logger.info(f"Parsing {file_path} with {parser.__class__.__name__}")
         return parser.parse(file_path, args)
+
+if __name__ == "__main__":
+    parser_factory = ParserFactory()
+    for file in Path(settings.KB_DIRECTORY).rglob("*"):
+        if file.is_file():
+            parser, format = parser_factory.get_parser_and_format(file)
+            if parser is not None:
+                print(f"Find {parser.__class__.__name__} compatible with {format.value} type for file: {file.relative_to(settings.KB_DIRECTORY)}")
+                logger.info(f"Find {parser.__class__.__name__} compatible with {format.value} type for file: {file.relative_to(settings.KB_DIRECTORY)}")
