@@ -4,20 +4,36 @@ A straight-forward FastAPI backend of knowledge base, LLM and RAG for retrieval.
 
 ## Quick Start
 
-### Prerequisites
+```bash
+vi .env
+# ANTHROPIC_API_KEY=[YOUR_API_KEY]
+# CLAUDE_MODEL=claude-sonnet-4-5-20250929
+# CLAUDE_MAX_TOKENS=1024
+
+python -m venv .venv
+source .venv/bin/activate
+
+poetry install
+
+make start-server
+```
+
+## Step-by-step
+
+### Prerequisites of Development
 
 This project depends on an API key in a Claude/Anthropic account to query the LLMs (see [Claude Console](https://console.anthropic.com/)).
 
 Upon obtaining an [API key](https://console.anthropic.com/settings/keys), it can be secured locally in this way:
 
 ```bash
-cat "CLAUDE_API_KEY=[YOUR_API_KEY]" >> .env
+cat "ANTHROPIC_API_KEY=[YOUR_API_KEY]" >> .env
 cat "CLAUDE_MODEL=claude-sonnet-4-5-20250929" >> .env   # default LLM model in this project
 cat "CLAUDE_MAX_TOKENS=1024" >> .env                    # limit token consumption
 source .env
 
 # test API key access
-echo $CLAUDE_API_KEY
+echo $ANTHROPIC_API_KEY
 ```
 
 Note that `.env` file already exists in `.gitignore` so as not to be committed into the code repo.
@@ -86,28 +102,32 @@ Currently, the supported knowledge document format is `markdown`. PDF format sup
 
 Additional document of knowledge can be manually added into `.knowledge_sources`.
 
-### Run server locally
+### Run server
 
 ```bash
 # production mode
-fastapi run src/main.py
+make start-server
+```
 
+Once running, the server should listen to `0.0.0.0:8000` by default.
+
+```bash
 # development mode
 fastapi dev src/main.py
 ```
 
 Once running, the server should listen to `127.0.0.1:8000` by default.
 
-### Debug server locally
+### Debug server
 
 ```bash
-fastapi dev src/main.py --reload
+make debug-server
 ```
 
 ### Run unit testing
 
 ```bash
-python -m unittest tests/*.py
+make test-all
 ```
 
 ## In-depth
@@ -118,11 +138,17 @@ The default semantic embedding model for this project is [`all-MiniLM-L6-v2`](ht
 
 ## TODOs
 
+### Essentials
+
+- [ ] Prompt: seek for external resources in case when domain knowledge is not sufficient
 - [ ] Design pattern & strategy: OOP, Separation of Concerns, modularization, boundaries between microservices
-- [ ] Support for various input file formats and multi-media parsing
-- [ ] MCP-based integration with OneNote etc.
+- [x] Support for various input file formats
+- [ ] Containerization preparation for microservice architecture
 - [x] Streaming responses via tokenization and server-sent events (SSE)
+
+### Good-to-have
+
+- [ ] MCP-based integration with OneNote etc.
+- [ ] multi-media parsing
 - [ ] DB storage of sessions instead of in-memory
-- [ ] LLM Steering VS Fine-tuning on models, chunking and embedding
-- [ ] Containerization preparation
 - [ ] Dataflow/Workflow orchestration

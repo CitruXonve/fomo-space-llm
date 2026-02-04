@@ -35,7 +35,7 @@ prepare-server:
 	@python src/service/knowledge_base.py
 
 start-server:
-	@make prepare-server && fastapi dev src/main.py --reload
+	@make prepare-server && fastapi run src/main.py
 
 debug-server:
-	@fastapi dev src/main.py --reload
+	@make prepare-server && fastapi dev src/main.py --reload
