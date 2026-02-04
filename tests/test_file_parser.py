@@ -19,7 +19,7 @@ class TestFileParser(unittest.TestCase):
         - Save as a PDF file to the `.knowledge_sources` directory.
         """
         pdf_path = settings.KB_DIRECTORY + \
-            "/ByteByteGo _ Technical Interview Prep - 02 Scale From Zero To Millions Of Users.pdf"
+            "/ByteByteGo _ Technical Interview Prep - clear.pdf"
         self.assertIsNotNone(self.parser_factory.get_parser_and_format(
             Path(pdf_path)))
         parser, format = self.parser_factory.get_parser_and_format(

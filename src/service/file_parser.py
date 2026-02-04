@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import logging
 from typing import TypeAlias
+from src.config.settings import settings
 from src.type.enums import ContentFormat
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class FileParser(ABC):
         pass
 
     @abstractmethod
-    def parse(self, file_path: Path) -> list[Section]:
+    def parse(self, file_path: Path, args: dict = {}) -> list[Section]:
         """
         Parse file into sections.
         Returns: list of Section tuples
@@ -38,13 +39,48 @@ class FileParser(ABC):
         pass
 
 
+def parse_markdown_to_sections(content: str) -> list[Section]:
+    header_pattern = r'^(#{1,6})\s+(.+)$'
+    sections = []
+    current_heading = "Introduction"
+    current_content = []
+
+    lines = content.split('\n')
+
+    for line in lines:
+        match = re.match(header_pattern, line, re.MULTILINE)
+
+        if match:
+            # Save previous section
+            if current_content:
+                sections.append((
+                    current_heading,
+                    '\n'.join(current_content).strip()
+                ))
+
+            # Start new section
+            current_heading = match.group(2).strip()
+            current_content = []
+        else:
+            current_content.append(line)
+
+    # Add final section
+    if current_content:
+        sections.append((
+            current_heading,
+            '\n'.join(current_content).strip()
+        ))
+
+    return sections
+
+
 class MarkdownParser(FileParser):
     """Parser for Markdown (.md) files"""
 
     def can_parse(self, file_path: Path) -> bool:
         return file_path.suffix.lower() == '.md'
 
-    def parse(self, file_path: Path) -> list[Section]:
+    def parse(self, file_path: Path, args: dict = {}) -> list[Section]:
         """Parse markdown into sections based on headers"""
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -56,38 +92,7 @@ class MarkdownParser(FileParser):
 
     def _parse_markdown_sections(self, content: str) -> list[Section]:
         """Parse markdown content by headers"""
-        header_pattern = r'^(#{1,6})\s+(.+)$'
-        sections = []
-        current_heading = "Introduction"
-        current_content = []
-
-        lines = content.split('\n')
-
-        for line in lines:
-            match = re.match(header_pattern, line, re.MULTILINE)
-
-            if match:
-                # Save previous section
-                if current_content:
-                    sections.append((
-                        current_heading,
-                        '\n'.join(current_content).strip()
-                    ))
-
-                # Start new section
-                current_heading = match.group(2).strip()
-                current_content = []
-            else:
-                current_content.append(line)
-
-        # Add final section
-        if current_content:
-            sections.append((
-                current_heading,
-                '\n'.join(current_content).strip()
-            ))
-
-        return sections
+        return parse_markdown_to_sections(content)
 
 
 class PDFParser(FileParser):
@@ -162,51 +167,36 @@ class PDFParser(FileParser):
 
         return filtered_dict
 
-    def parse(self, file_path: Path) -> list[Section]:
+    def parse(self, file_path: Path, args: dict = {}) -> list[Section]:
         """Parse PDF into sections"""
-        from langchain_community.document_loaders import PyMuPDFLoader
-        loader = PyMuPDFLoader(str(file_path))
-        documents = loader.load()
+        from hashlib import md5
+        md5_hash = md5(file_path.read_bytes()).hexdigest()
+
+        import pymupdf.layout  # avoid falling back to legacy mode that ignores use_ocr=False
+        import pymupdf4llm
+        md_text = pymupdf4llm.to_markdown(str(
+            file_path), headers=False, footers=False, page_chunks=True, write_images=False, show_progress=True, use_ocr=False)
 
         from langchain_text_splitters import RecursiveCharacterTextSplitter
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=args.get(
+                'chunk_size', settings.EMBEDDING_MODEL_CHUNK_SIZE),
+            chunk_overlap=args.get(
+                'chunk_overlap', settings.EMBEDDING_MODEL_CHUNK_OVERLAP),
             separators=["\n\n", "\n", " ", ""]
         )
 
-        chunks = text_splitter.split_documents(documents)
-        import json
-        # Aggregate sections by page label
-        from collections import defaultdict
-        sections_dict = defaultdict(list)
+        sections = []
+        for page in md_text:
+            parsed_sections = parse_markdown_to_sections(page["text"])
+            for parsed_section in parsed_sections:
+                text_chunks = text_splitter.split_text(parsed_section[1])
+                for text_chunk in text_chunks:
+                    if text_chunk.strip():
+                        sections.append(text_chunk)
 
-        for doc in chunks:
-            section = doc.page_content.strip()
-            if not section:
-                continue
-            print("Page metadata:", json.dumps(doc.metadata, indent=4))
-
-            page_label = f"Page Label {doc.metadata.get('page', 'Unknown')}"
-            text_lines = [text.lstrip()
-                          for text in section.split('\n') if text.lstrip()]
-
-            # Filter out header/footer lines based on patterns
-            filtered_lines = [
-                line for line in text_lines
-                if not self._is_header_footer_line(line)
-            ]
-
-            sections_dict[page_label].extend(filtered_lines)
-
-        # Filter out repeated lines across pages (likely headers/footers)
-        sections_dict = self._filter_repeated_lines(sections_dict)
-
-        # Convert dict to list of tuples, maintaining insertion order
-        sections = [(page_label, lines)
-                    for page_label, lines in sections_dict.items()]
-
-        return sections
+        return [(f"{md5_hash}-{section_index}", section_content)
+                for section_index, section_content in enumerate(sections)]
 
 
 class TextParser(FileParser):
@@ -218,7 +208,7 @@ class TextParser(FileParser):
     def get_format(self) -> ContentFormat:
         return ContentFormat.TXT
 
-    def parse(self, file_path: Path) -> list[Section]:
+    def parse(self, file_path: Path, args: dict = {}) -> list[Section]:
         """Parse plain text into sections"""
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -299,7 +289,7 @@ class ParserFactory:
         logger.warning(f"No parser found for file: {file_path}")
         return None
 
-    def parse_file(self, file_path: Path) -> list[Section]:
+    def parse_file(self, file_path: Path, args: dict = {}) -> list[Section]:
         """Parse file using appropriate parser"""
         parser, _ = self.get_parser_and_format(file_path)
 
@@ -307,4 +297,4 @@ class ParserFactory:
             raise ValueError(f"Unsupported file format: {file_path.suffix}")
 
         logger.info(f"Parsing {file_path} with {parser.__class__.__name__}")
-        return parser.parse(file_path)
+        return parser.parse(file_path, args)
