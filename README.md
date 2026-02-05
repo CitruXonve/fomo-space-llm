@@ -1,14 +1,24 @@
-# RAG FAQ Backend
+# "FomoSpace" RAG-powered Backend
 
-A straight-forward FastAPI backend of knowledge base, LLM and RAG for retrieval.
+A lightweight FastAPI backend service that digests upstream documents or files, and uses LLM and RAG for knowledge retrieval.
 
 ## Quick Start
 
+Dependencies:
+
+- `Python >= 3.11`
+- `Poetry >= 2.0`
+- an API key in a Claude/Anthropic account with available funds (see [Claude Console](https://console.anthropic.com/)).
+
+Commands:
+
 ```bash
+# environment variables - can be overridden at runtime
 vi .env
 # ANTHROPIC_API_KEY=[YOUR_API_KEY]
 # CLAUDE_MODEL=claude-sonnet-4-5-20250929
 # CLAUDE_MAX_TOKENS=1024
+source .env
 
 python -m venv .venv
 source .venv/bin/activate
@@ -18,21 +28,85 @@ poetry install
 make start-server
 ```
 
+## RESTful API Endpoints
+
+### Chat (Synchronous)
+
+#### `POST /api/chat`
+
+- Description: Creates a chat session or continues an existing one by sending a message.
+- Request Body:
+  ```json
+  {
+    "session_id": "string (optional, uuid4 format)",
+    "message": "string"
+  }
+  ```
+- Response:
+  - Status: 201 Created
+  - Body:
+  ```json
+  {
+    "status": "success",
+    "session_id": "string",
+    "messages": [ ... ] // List of message objects
+  }
+  ```
+
+#### `GET /api/chat/{session_id}`
+
+- Description: Retrieves the message history for a specific chat session.
+- Response:
+  - Status: 200 OK
+  - Body:
+  ```json
+  {
+    "status": "success",
+    "session_id": "string",
+    "messages": [ ... ] // List of message objects
+  }
+  ```
+
+### Chat via Streaming (Asynchronous)
+
+#### `POST /api/chat-stream`
+
+- Description: Sends a message and receives an event-streaming response for real-time updates.
+- Request Body:
+  ```json
+  {
+    "session_id": "string (optional, uuid4 format)",
+    "message": "string"
+  }
+  ```
+- Response:
+  - Status: 200 OK
+  - Type: `text/event-stream`
+  - Body: Stream of generated message content chunks
+
+### Health Check
+
+#### `GET /api/health`
+
+- Description: Verify that the API server is running and healthy.
+- Request: _(No request body required)_
+- Response:
+  - Status: 200 OK
+  - Body:
+    ```json
+    {
+      "message": "<App title> API is running"
+    }
+    ```
+
 ## Step-by-step
 
 ### Prerequisites of Development
 
-This project depends on an API key in a Claude/Anthropic account to query the LLMs (see [Claude Console](https://console.anthropic.com/)).
-
-Upon obtaining an [API key](https://console.anthropic.com/settings/keys), it can be secured locally in this way:
+Upon obtaining an [Anthropic API key](https://console.anthropic.com/settings/keys), it can be secured locally in this way:
 
 ```bash
-cat "ANTHROPIC_API_KEY=[YOUR_API_KEY]" >> .env
-cat "CLAUDE_MODEL=claude-sonnet-4-5-20250929" >> .env   # default LLM model in this project
-cat "CLAUDE_MAX_TOKENS=1024" >> .env                    # limit token consumption
-source .env
-
-# test API key access
+# test API key access after "source .env"
 echo $ANTHROPIC_API_KEY
 ```
 
@@ -51,18 +125,19 @@ echo '# direnv' >> ~/.zshrc
 echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
 ```
 
-### Dependency resolution
+### Virtual Environment Setup
 
-Dependencies:
+(If you have other virtual environment activated before, simply run `deactivate` before-hand).
 
-- `Python >= 3.11`
-- `Poetry >= 2.0`
-
-This is to set up a virtual environment in the project directory:
+This is to create a virtual environment in the project directory:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+
+# validate the python interpreter location and version
+which python
+python -V
 ```
 
 ([Read more](https://share.google/aimode/07EdicDMsIzbsvX2p))
@@ -80,7 +155,7 @@ poetry install # first-time only
 poetry update
 ```
 
-Optional: in case of the error ` pyproject.toml changed significantly since poetry.lock was last generated. Run ``poetry lock`` to fix the lock file.  `
+Optional: in case of the error `pyproject.toml changed significantly since poetry.lock was last generated. Run ``poetry lock`` to fix the lock file: `
 
 ```bash
 poetry lock
@@ -130,6 +205,34 @@ make debug-server
 make test-all
 ```
 
+## Project Structure
+
+```
+.
+├── README.md
+├── makefile
+├── poetry.lock
+├── pyproject.toml
+├── src/
+│   ├── main.py
+│   ├── config/
+│   │   └── settings.py
+│   ├── service/
+│   │   ├── fetch_service.py
+│   │   ├── file_parser.py
+│   │   └── knowledge_base.py
+│   ├── type/
+│   │   └── enums.py
+│   └── utility/
+│       └── spinner.py
+├── tests/
+│   ├── test_chat.py
+│   ├── test_fetcher.py
+│   ├── test_file_parser.py
+│   ├── test_kb.py
+│   └── test_llm.py
+```
+
 ## In-depth
 
 ### Embeddings
@@ -140,7 +243,7 @@ The default semantic embedding model for this project is [`all-MiniLM-L6-v2`](ht
 
 ### Essentials
 
-- [ ] Prompt: seek for external resources in case when domain knowledge is not sufficient
+- [ ] Self-taught prompt: fetch from external resources in case when domain knowledge is not sufficient
 - [ ] Design pattern & strategy: OOP, Separation of Concerns, modularization, boundaries between microservices
 - [x] Support for various input file formats
 - [ ] Containerization preparation for microservice architecture

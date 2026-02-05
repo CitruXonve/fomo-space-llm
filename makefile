@@ -28,11 +28,15 @@ redis-test:
 clear-local-cache:
 	@rm -rf .models .embedding_cache
 
+fetch:
+	@echo "Fetching posts from GitHub repository..."
+	@python src/service/fetch_service.py
+
 scan-source-files:
 	@python src/service/file_parser.py
 
 prepare-server:
-	@python src/service/knowledge_base.py
+	@make fetch && python src/service/knowledge_base.py
 
 start-server:
 	@make prepare-server && fastapi run src/main.py
