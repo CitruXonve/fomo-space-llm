@@ -8,6 +8,7 @@ Dependencies:
 
 - `Python >= 3.11`
 - `Poetry >= 2.0`
+- `Docker >= 28.5`
 - an API key in a Claude/Anthropic account with available funds (see [Claude Console](https://console.anthropic.com/)).
 
 Commands:
@@ -20,12 +21,18 @@ vi .env
 # CLAUDE_MAX_TOKENS=1024
 source .env
 
-python -m venv .venv
-source .venv/bin/activate
-
-poetry install
-
+# Start the server (builds image on first run)
 make start-server
+
+# View logs
+make logs-server
+
+# Stop the server
+make stop-server
+
+# Rebuild after code changes
+make build-server
+make restart-server
 ```
 
 ## RESTful API Endpoints
@@ -180,14 +187,14 @@ Additional document of knowledge can be manually added into `.knowledge_sources`
 ### Run server
 
 ```bash
-# production mode
+# local run in production mode
 make start-server
 ```
 
 Once running, the server should listen to `0.0.0.0:8000` by default.
 
 ```bash
-# development mode
+# local run in development mode
 fastapi dev src/main.py
 ```
 
@@ -246,7 +253,7 @@ The default semantic embedding model for this project is [`all-MiniLM-L6-v2`](ht
 - [ ] Self-taught prompt: fetch from external resources in case when domain knowledge is not sufficient
 - [ ] Design pattern & strategy: OOP, Separation of Concerns, modularization, boundaries between microservices
 - [x] Support for various input file formats
-- [ ] Containerization preparation for microservice architecture
+- [x] Containerization preparation for microservice architecture
 - [x] Streaming responses via tokenization and server-sent events (SSE)
 
 ### Good-to-have

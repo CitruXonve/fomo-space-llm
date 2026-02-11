@@ -39,6 +39,21 @@ prepare-server:
 	@make fetch && python src/service/knowledge_base.py
 
 start-server:
+	@docker-compose up -d
+
+stop-server:
+	@docker-compose down
+
+restart-server:
+	@docker-compose restart
+
+logs-server:
+	@docker-compose logs -f fastapi
+
+build-server:
+	@docker-compose build
+
+start-server-local:
 	@make prepare-server && fastapi run src/main.py
 
 debug-server:
