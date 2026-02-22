@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     """Application settings."""
 
     # App settings
-    APP_TITLE: str = "CitruXonve FAQ Backend"
+    APP_TITLE: str = "FomoSpace Backend"
     APP_DESCRIPTION: str = "A FastAPI backend of knowledge base, LLM and RAG for retrieval"
     APP_VERSION: str = "1.0.0"
 
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     CLAUDE_MODEL: str
     CLAUDE_TEMPERATURE: float = 0.7  # Balanced - not too creative, not too rigid
     CLAUDE_MAX_TOKENS: int
+    CLAUDE_WEB_SEARCH_TOOL: str
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(Path(__file__).parent.parent.parent, '.env'),

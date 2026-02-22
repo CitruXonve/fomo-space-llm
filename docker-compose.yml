@@ -19,6 +19,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL}
       - CLAUDE_MAX_TOKENS=${CLAUDE_MAX_TOKENS}
+      - CLAUDE_WEB_SEARCH_TOOL=${CLAUDE_WEB_SEARCH_TOOL}
     env_file:
       - .env
     volumes:

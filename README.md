@@ -18,9 +18,14 @@ Commands:
 vi .env
 # ANTHROPIC_API_KEY=[YOUR_API_KEY]
 # CLAUDE_MODEL=claude-sonnet-4-5-20250929
+# CLAUDE_WEB_SEARCH_TOOL=web_search_20260209
 # CLAUDE_MAX_TOKENS=1024
 source .env
+```
 
+([Read more](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool) - the web search tool version and the supported models in Claude API Docs)
+
+```bash
 # Start the server (builds image on first run)
 make start-server
 

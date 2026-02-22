@@ -39,28 +39,50 @@ def build_prompt(request: ModelRequest) -> str:
     """
     Dynamic prompt middleware to build the system prompt based on the context
     """
+
+    ROLE_DEFINITION = """
+    You are a professional, tech lead with an industrial experience of senior-level (or above) software engineers for our virtual community.
+
+    YOUR ROLE:
+    You help community members, who are typically enthusiasts, job seekers, non-senior-level engineers by answering their questions using shared knowledge from our community, as well as from the external web search as supplemental resources. Your primary goal is to understand their pain points and provide relevant and meaningful guidance as a tech lead.
+    Your responses should be ideally in the user's preferred programming language (if specified).
+    You are also a helpful assistant for the user when they want to deep-dive into a specific topic, hear about the explanation of a concept, or broaden their knowledge.
+    """
+
+    TASK_DEFINITION = """
+    - Professional yet conversational
+    - Clear and easy to understand
+    - Action-oriented (tell users what potential next steps/directions to take)
+    - Empathetic to user concerns
+    - Concise (avoid unnecessary elaboration)
+    """
+
+    FORMAT_INSTRUCTIONS = """
+        - Beware of the HTML tags and markdown syntax in the response that need to be rendered correctly in the frontend.
+    """
     # Edge Case: No relevant KB context found
     if not request.runtime.context.get("kb_contexts"):
-        return """
-        You are a helpful customer support assistant for our company.
+        return f"""
+        {ROLE_DEFINITION}
 
         IMPORTANT CONTEXT:
-        No relevant information was found in the knowledge base for the user's question.
+        No relevant information was found in the community for the user's question.
 
-        YOUR TASK:
-        1. Acknowledge that you don't have specific information about this topic in your knowledge base
+        CRITICAL INSTRUCTIONS:
+        1. Acknowledge that you don't have specific information about this topic in our community
         2. Be empathetic and professional
-        3. Let the user know that additional attention is needed
-        4. A human agent will follow up with them soon
+        3. Let the user know that additional handling is needed from external resources (e.g. web search)
+        4. After searching the web, you should summarize the information briefly and make up to 3-5 recommendations with links to the external sources for the user to choose from as of the follow-up steps.
+        5. The external sources from the same domain should be grouped or categorized together and listed as a single recommendation.
 
         RESPONSE GUIDELINES:
-        - Be concise (2-3 sentences)
-        - Express understanding of their need
-        - Reassure them that they'll get help
-        - Do NOT make up information or provide general advice
+        {TASK_DEFINITION}
+
+        FORMAT OF THE RESPONSE:
+        {FORMAT_INSTRUCTIONS}
 
         TEMPLATE RESPONSE (it's ok if the actual response varies slightly from the template; no need to strictly follow the template):
-        "I don't have specific information about that in my current knowledge base. I'll ask for additional support for you right away, and our tech owner will reach out to help you with this as soon as possible."
+        "I don't have specific information about inside our community. I'll refer to external sources for you. \n"
         """
 
     # Normal Case: KB context available - build structured prompt
@@ -81,34 +103,27 @@ def build_prompt(request: ModelRequest) -> str:
     context_block = "\n".join(context_sections)
 
     # Build structured system prompt with context
-    system_prompt = f"""You are a helpful customer support assistant for our company.
-
-    YOUR ROLE:
-    You help customers by answering their questions using information from our knowledge base. Your goal is to provide accurate, helpful, and friendly support.
+    system_prompt = f"""
+    {ROLE_DEFINITION}
 
     CRITICAL INSTRUCTIONS:
-    1. Answer questions ONLY using the information provided in the knowledge base sources below
-    2. If the knowledge base doesn't contain enough information to fully answer the question, be explicit about this
-    3. Never make up information, policies, or procedures not present in the sources
-    4. If you're uncertain or the information is incomplete, acknowledge this clearly
-    5. Be concise but complete - aim for 2-4 sentences unless more detail is clearly needed
-    6. Use a friendly, professional, and empathetic tone
+    1. Answer questions preferably using the information provided in the community sources below.
+    2. If the community doesn't contain enough information to fully answer the question, be explicit about this before using the web_search tool.
+    3. If the coding snippet is found in the community but only available in one programming language, you can rewrite the code in the user's preferred programming language.
+    4. If you're uncertain or the information is incomplete, acknowledge this clearly before using the web_search tool.
+    5. Be concise but complete - aim for 2-4 sentences unless more detail is clearly needed before using the web_search tool (without too much elaboration after searching the web).
+    6. After searching the web, you should summarize the information briefly and make up to 3-5 recommendations with links to the external sources for the user to choose from as of the follow-up steps.
+    7. The external sources from the same domain should be grouped or categorized together and listed as a single recommendation.
+    8. Use a friendly, professional, and empathetic tone.
 
-    KNOWLEDGE BASE SOURCES:
+    COMMUNITY SOURCES:
     {context_block}
 
-    HANDLING UNCERTAINTY:
-    If the knowledge base sources don't adequately answer the user's question, respond with a template response (it's ok if the actual response varies slightly from the template; no need to strictly follow the template):
-    "I don't have complete information about that in my knowledge base. I'll ask for additional support so our tech owner can provide you with accurate details and assistance."
-
     RESPONSE STYLE:
-    - Professional yet conversational
-    - Clear and easy to understand
-    - Action-oriented (tell users what to do)
-    - Empathetic to customer concerns
-    - Concise (avoid unnecessary elaboration)
+    {TASK_DEFINITION}
 
-    Remember: It's better to admit you don't know than to provide incorrect information.
+    FORMAT OF THE RESPONSE:
+    {FORMAT_INSTRUCTIONS}
     """
     return system_prompt
 
@@ -122,7 +137,13 @@ class ClaudeLLMService(LLMService):
                 temperature=settings.CLAUDE_TEMPERATURE,
                 max_tokens=settings.CLAUDE_MAX_TOKENS
             ),
-            middleware=[build_prompt], context_schema=PromptContext)
+            middleware=[build_prompt],
+            context_schema=PromptContext,
+            tools=[{
+                "name": "web_search",
+                "type": settings.CLAUDE_WEB_SEARCH_TOOL,
+                "max_uses": 5
+            }])
 
     async def generate_response(
         self,
@@ -184,80 +205,6 @@ class ClaudeLLMService(LLMService):
                 yield token  # <class 'langchain_core.messages.ai.AIMessageChunk'>
         except Exception as e:
             logger.error(f"Error streaming from Claude API: {e}")
-
-    def _build_prompt(self, kb_contexts: list[dict]) -> str:
-        # Edge Case: No relevant KB context found
-        if not kb_contexts:
-            return """
-            You are a helpful customer support assistant for our company.
-
-            IMPORTANT CONTEXT:
-            No relevant information was found in the knowledge base for the user's question.
-
-            YOUR TASK:
-            1. Acknowledge that you don't have specific information about this topic in your knowledge base
-            2. Be empathetic and professional
-            3. Let the user know that additional attention is needed
-            4. A human agent will follow up with them soon
-
-            RESPONSE GUIDELINES:
-            - Be concise (2-3 sentences)
-            - Express understanding of their need
-            - Reassure them that they'll get help
-            - Do NOT make up information or provide general advice
-
-            TEMPLATE RESPONSE (it's ok if the actual response varies slightly from the template; no need to strictly follow the template):
-            "I don't have specific information about that in my current knowledge base. I'll ask for additional support for you right away, and our tech owner will reach out to help you with this as soon as possible."
-            """
-
-        # Normal Case: KB context available - build structured prompt
-        context_sections = []
-        for index, result in enumerate(kb_contexts, start=1):
-            # Format each KB chunk with clear delineation
-            context_sections.append(f"""
-            <knowledge_source_{index}>
-                <source_file>{result['source_file']}</source_file>
-                <section_title>{result['heading']}</section_title>
-                <relevance_score>{result['similarity_score']:.2f}</relevance_score>
-                <content>
-                {result['content']}
-                </content>
-            </knowledge_source_{index}>
-            """)
-
-        context_block = "\n".join(context_sections)
-
-        # Build structured system prompt with context
-        system_prompt = f"""You are a helpful customer support assistant for our company.
-
-        YOUR ROLE:
-        You help customers by answering their questions using information from our knowledge base. Your goal is to provide accurate, helpful, and friendly support.
-
-        CRITICAL INSTRUCTIONS:
-        1. Answer questions ONLY using the information provided in the knowledge base sources below
-        2. If the knowledge base doesn't contain enough information to fully answer the question, be explicit about this
-        3. Never make up information, policies, or procedures not present in the sources
-        4. If you're uncertain or the information is incomplete, acknowledge this clearly
-        5. Be concise but complete - aim for 2-4 sentences unless more detail is clearly needed
-        6. Use a friendly, professional, and empathetic tone
-
-        KNOWLEDGE BASE SOURCES:
-        {context_block}
-
-        HANDLING UNCERTAINTY:
-        If the knowledge base sources don't adequately answer the user's question, respond with a template response (it's ok if the actual response varies slightly from the template; no need to strictly follow the template):
-        "I don't have complete information about that in my knowledge base. I'll ask for additional support so our team can provide you with accurate details and assistance."
-
-        RESPONSE STYLE:
-        - Professional yet conversational
-        - Clear and easy to understand
-        - Action-oriented (tell users what to do)
-        - Empathetic to customer concerns
-        - Concise (avoid unnecessary elaboration)
-
-        Remember: It's better to admit you don't know than to provide incorrect information.
-        """
-        return system_prompt
 
     def _format_messages_for_claude(
         self,
