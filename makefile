@@ -57,4 +57,4 @@ start-server-local:
 	@make prepare-server && fastapi run src/main.py
 
 debug-server:
-	@make prepare-server && fastapi dev src/main.py --reload
+	fastapi dev src/main.py --reload

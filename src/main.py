@@ -14,6 +14,7 @@ app = FastAPI(
     title=settings.APP_TITLE,
     description=settings.APP_DESCRIPTION,
     version=settings.APP_VERSION,
+    port=8000,
 )
 
 # CORS middleware

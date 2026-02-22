@@ -6,6 +6,8 @@ from src.main import app
 
 class TestChat(unittest.TestCase):
     """Test: User question -> AI response -> case-by-case handling"""
+    # Override FastAPI app port for unit testing purposes; port 8000 can be in use by the server
+    app.port = 8001
 
     def test_chat_dataflow(self):
         """Use TestClient as context manager to ensure startup_event is called"""
