@@ -1,12 +1,17 @@
-import logging
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from src.config.settings import settings
-from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
-from src.service.llm_service import ClaudeLLMService
-from src.service.session_service import SessionService
 from src.api.chat import router as chat_router, stream_router
+from src.service.session_service import SessionService
+from src.service.llm_service import ClaudeLLMService
+from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
+from src.config.settings import settings
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+import logging
+
+# Apply compatibility patches before any Anthropic streaming (handles dict container/context_management)
+from src.compat import apply_langchain_anthropic_patch
+
+apply_langchain_anthropic_patch()
+
 
 logger = logging.getLogger(__name__)
 
