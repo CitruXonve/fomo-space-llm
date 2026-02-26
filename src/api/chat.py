@@ -120,6 +120,7 @@ async def create_chat_stream(
         """
         Escape HTML tags and markdown syntax in the content.
         """
+        # return content.replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;").replace("##", "<br/> ##").replace("\n", "  \n")
         return content.replace("##", "<br/> ##").replace("\n", "  \n")
 
     async def _stream_generator(request: ChatRequest, llm_service: ClaudeLLMService, chat_history):

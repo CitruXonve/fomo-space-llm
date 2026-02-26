@@ -60,6 +60,7 @@ def build_prompt(request: ModelRequest) -> str:
     FORMAT_INSTRUCTIONS = """
         - Beware of the HTML tags and markdown syntax in the response that need to be rendered correctly in the frontend.
     """
+    # For example, a title/subtitle marked with leading one or more '#'-sign(s) should come with a <br/> tag in the end of the line.
     # Edge Case: No relevant KB context found
     if not request.runtime.context.get("kb_contexts"):
         return f"""

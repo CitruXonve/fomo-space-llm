@@ -16,7 +16,7 @@ Commands:
 ```bash
 # environment variables - can be overridden at runtime
 vi .env
-# ANTHROPIC_API_KEY=[YOUR_API_KEY]
+# ANTHROPIC_API_KEY=[YOUR_ANTHROPIC_API_KEY]
 # CLAUDE_MODEL=claude-sonnet-4-5-20250929
 # CLAUDE_WEB_SEARCH_TOOL=web_search_20260209
 # CLAUDE_MAX_TOKENS=1024
@@ -215,6 +215,19 @@ make debug-server
 
 ```bash
 make test-all
+```
+
+### Observatory via LangSmith
+
+LangSmith settings for tracing and monitoring in `.env`:
+
+```bash
+vi .env
+# ...
+# LANGSMITH_TRACING=true
+# LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+# LANGSMITH_API_KEY=[YOUR_LANGSMITH_API_KEY]
+# LANGSMITH_PROJECT="[YOUR_LANGSMITH_PROJECT_NAME]"
 ```
 
 ## Project Structure

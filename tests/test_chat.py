@@ -54,6 +54,8 @@ class TestChat(unittest.TestCase):
         with TestClient(app) as client:
             with client.stream("POST", "/api/chat-stream", json={
                 "message": "How do I perform back-of-envelope estimation?"
+                # "message": "What is the difference between a thread and a process?"
+                # "message": "Any ideas on OLTP vs OLAP, and their use cases?"
             }) as resp:
                 print("Resp:", resp)
                 self.assertEqual(resp.status_code, 200)
