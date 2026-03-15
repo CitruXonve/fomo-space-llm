@@ -20,12 +20,15 @@ class GitHubRepoFetchService:
         response = requests.get(self.repository_url)
         scripts = BeautifulSoup(response.text, 'html.parser').find_all(
             'script', type='application/json')
-        if len(scripts) < 1 or scripts[-1].text is None:
+        if len(scripts) < 1 or scripts[-2].text is None:
             raise ValueError("No scripts found")
-        posts = json.loads(scripts[-1].text)
-        if "payload" not in posts or "tree" not in posts["payload"] or "items" not in posts["payload"]["tree"]:
+        posts = json.loads(scripts[-2].text)
+        if "payload" not in posts or \
+            "codeViewTreeRoute" not in posts["payload"] or \
+            "tree" not in posts["payload"]["codeViewTreeRoute"] or \
+                "items" not in posts["payload"]["codeViewTreeRoute"]["tree"]:
             raise ValueError("No content data field found")
-        repos = posts["payload"]["tree"]["items"]
+        repos = posts["payload"]["codeViewTreeRoute"]["tree"]["items"]
         return repos
 
     def fetch_post_content(self, relative_path: str) -> str:
