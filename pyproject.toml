@@ -29,6 +29,7 @@ langchain-community = "^0.4.1"
 pymupdf = "^1.26.6"
 pymupdf4llm = "^0.2.9"
 pymupdf-layout = "^1.26.6"
+redis = "^7.3.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

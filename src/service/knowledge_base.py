@@ -72,7 +72,7 @@ class KnowledgeBaseService(ABC):
         pass
 
     @abstractmethod
-    def search(self, query: str) -> list[dict]:
+    def search(self, query: str, top_k: int = settings.DEFAULT_TOP_K, similarity_threshold: float = settings.DEFAULT_SIMILARITY_THRESHOLD) -> list[dict]:
         """Semantic search using embeddings"""
         # Returns relevant KB chunks
         pass
@@ -89,22 +89,25 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
     4. Generate embeddings using sentence-transformers
     5. Perform semantic search using cosine similarity
     """
+    embeddings: Optional[np.ndarray]
 
-    def __init__(self):
-        self.kb_directory = Path(settings.KB_DIRECTORY)
+    def __init__(self, kb_directory: str | None = None, cache_prefix: str = ""):
+        self.kb_directory = Path(kb_directory) if kb_directory else Path(
+            settings.KB_DIRECTORY)
         self.chunk_size = settings.EMBEDDING_MODEL_CHUNK_SIZE
         self.chunk_overlap = settings.EMBEDDING_MODEL_CHUNK_OVERLAP
 
-        # Embedding cache paths
+        # Embedding cache paths — namespaced by cache_prefix to support multiple instances
         self.cache_dir = Path(settings.EMBEDDING_CACHE_DIR)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.embeddings_cache_file = self.cache_dir / "embeddings.npy"
-        self.chunks_cache_file = self.cache_dir / "chunks.json"
-        self.hash_cache_file = self.cache_dir / "kb_hash.txt"
+        prefix = f"{cache_prefix}_" if cache_prefix else ""
+        self.embeddings_cache_file = self.cache_dir / f"{prefix}embeddings.npy"
+        self.chunks_cache_file = self.cache_dir / f"{prefix}chunks.json"
+        self.hash_cache_file = self.cache_dir / f"{prefix}kb_hash.txt"
 
         # Load embedding model (cached locally in EMBEDDING_MODEL_CACHE_DIR)
         logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}")
-        self.model = SentenceTransformer(
+        self.model: SentenceTransformer = SentenceTransformer(
             settings.EMBEDDING_MODEL,
             cache_folder=settings.EMBEDDING_MODEL_CACHE_DIR
         )
@@ -112,7 +115,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
 
         # Initialize storage
         self.chunks: list[MarkdownChunk] = []
-        self.embeddings: Optional[np.ndarray] = None
+        self.embeddings = None
 
         # Compute current KB hash
         current_hash = self._compute_kb_hash()
@@ -428,7 +431,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         texts = [chunk.content for chunk in self.chunks]
 
         # Generate embeddings in batch (faster)
-        embeddings = self.model.encode(
+        embeddings: np.ndarray = self.model.encode(
             texts,
             batch_size=settings.EMBEDDING_MODEL_BATCH_SIZE,
             show_progress_bar=settings.EMBEDDING_MODEL_SHOW_PROGRESS_BAR,
@@ -491,6 +494,75 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
             f"Search query: '{query}' - Found {len(results)} relevant chunks")
 
         return results
+
+
+class KnowledgeBaseServiceMultiFormat(KnowledgeBaseServiceMarkdown):
+    """
+    KB service for scoped (category / session) directories.
+
+    Overrides _load_knowledge_base() to load .md, .pdf, and .txt files via
+    ParserFactory, so that uploaded files of any supported format are indexed.
+    Inherits all chunking, embedding, caching, and search logic from the parent.
+    """
+
+    def _load_knowledge_base(self) -> None:
+        from src.service.file_parser import ParserFactory
+        factory = ParserFactory()
+
+        if not self.kb_directory.exists():
+            raise FileNotFoundError(
+                f"Knowledge base directory not found: {self.kb_directory}")
+
+        supported_suffixes = {".md", ".pdf", ".txt"}
+        all_files = [
+            f for f in sorted(self.kb_directory.iterdir())
+            if f.is_file() and f.suffix.lower() in supported_suffixes
+        ]
+
+        if not all_files:
+            raise ValueError(
+                f"No supported files found in {self.kb_directory}")
+
+        logger.info(f"Found {len(all_files)} file(s) in {self.kb_directory}")
+
+        for file_path in all_files:
+            try:
+                sections = factory.parse_file(file_path)
+            except Exception as e:
+                logger.warning(f"Failed to parse {file_path.name}: {e}")
+                continue
+
+            for section_index, (heading, section_content) in enumerate(sections):
+                section_chunks = self._chunk_section(section_content)
+                for chunk_index, chunk_text in enumerate(section_chunks):
+                    chunk_with_context = self._add_context(heading, chunk_text)
+                    chunk = MarkdownChunk(
+                        content=chunk_with_context,
+                        source_file=file_path.name,
+                        heading=heading,
+                        chunk_index=section_index *
+                        len(section_chunks) + chunk_index,
+                    )
+                    self.chunks.append(chunk)
+
+    def _compute_kb_hash(self) -> str:
+        """Override to include all supported file types in the hash."""
+        if not self.kb_directory.exists():
+            return ""
+
+        supported_suffixes = {".md", ".pdf", ".txt"}
+        hash_data = []
+        for f in sorted(self.kb_directory.iterdir()):
+            if f.is_file() and f.suffix.lower() in supported_suffixes:
+                stat = f.stat()
+                hash_data.append(f"{f.name}:{stat.st_size}:{stat.st_mtime}")
+
+        hash_data.append(f"chunk_size:{self.chunk_size}")
+        hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
+        hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
+
+        return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
+
 
 if __name__ == "__main__":
     KnowledgeBaseServiceMarkdown()
