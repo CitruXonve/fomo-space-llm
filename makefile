@@ -12,6 +12,12 @@ test-chat:
 
 test-fetcher:
 	@python -m unittest tests/test_fetcher.py
+	
+test-ctx:
+	@python -m unittest tests/test_context.py
+
+test-kstore:
+	@python -m unittest tests/test_knowledge_file.py
 
 test-all:
 	@python -m unittest tests/*.py

@@ -2,10 +2,10 @@ import json
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 
 from src.config.settings import settings
-from src.service.knowledge_file_service import KnowledgeBaseFileService, FileInfo
+from src.service.knowledge_file_service import KnowledgeFileService, FileInfo
 from src.type.enums import ContextPersistence, ContextScope
 
 context_router = APIRouter(prefix="/api/context", tags=["context"])
@@ -14,7 +14,7 @@ _SAFE_FILENAME_RE = re.compile(r'^[\w\-. ]+$')
 
 
 # Dependency
-def get_knowledge_file_service(request: Request) -> KnowledgeBaseFileService:
+def get_knowledge_file_service(request: Request) -> KnowledgeFileService:
     return request.app.state.knowledge_file_service
 
 
@@ -40,7 +40,7 @@ async def list_knowledge_files(
     scope: ContextScope = Query(default=ContextScope.GLOBAL),
     session_id: Optional[str] = Query(default=None),
     category_id: Optional[str] = Query(default=None),
-    knowledge_file_service: KnowledgeBaseFileService = Depends(
+    knowledge_file_service: KnowledgeFileService = Depends(
         get_knowledge_file_service),
 ):
     """
@@ -73,7 +73,7 @@ async def upload_knowledge_file(
     description: Optional[str] = Form(default=None),
     # JSON array string, e.g. '["faq","hr"]'
     tags: Optional[str] = Form(default=None),
-    knowledge_file_service: KnowledgeBaseFileService = Depends(
+    knowledge_file_service: KnowledgeFileService = Depends(
         get_knowledge_file_service),
 ):
     """
@@ -147,7 +147,7 @@ async def get_kb_stats(
     scope: Optional[ContextScope] = Query(default=None),
     session_id: Optional[str] = Query(default=None),
     category_id: Optional[str] = Query(default=None),
-    knowledge_file_service: KnowledgeBaseFileService = Depends(
+    knowledge_file_service: KnowledgeFileService = Depends(
         get_knowledge_file_service),
 ):
     """
@@ -166,7 +166,7 @@ async def get_knowledge_file(
     scope: ContextScope = Query(default=ContextScope.GLOBAL),
     session_id: Optional[str] = Query(default=None),
     category_id: Optional[str] = Query(default=None),
-    knowledge_file_service: KnowledgeBaseFileService = Depends(
+    knowledge_file_service: KnowledgeFileService = Depends(
         get_knowledge_file_service),
 ):
     """
@@ -192,7 +192,7 @@ async def delete_knowledge_file(
     scope: ContextScope = Query(default=ContextScope.GLOBAL),
     session_id: Optional[str] = Query(default=None),
     category_id: Optional[str] = Query(default=None),
-    knowledge_file_service: KnowledgeBaseFileService = Depends(
+    knowledge_file_service: KnowledgeFileService = Depends(
         get_knowledge_file_service),
 ):
     """
@@ -211,4 +211,4 @@ async def delete_knowledge_file(
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-    return {"status": "success", "deleted": True}
+    return Response(status_code=status.HTTP_204_NO_CONTENT)  # no response body

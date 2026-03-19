@@ -19,7 +19,7 @@ class LLMService(ABC):
         pass
 
     @abstractmethod
-    async def generate_response(self, user_message: str, chat_history: list = []) -> tuple[list[AnyMessage, list[dict]]]:
+    async def generate_response(self, user_message: str, chat_history: list = []) -> tuple[list[AnyMessage], list[dict]]:
         pass
 
     @abstractmethod
@@ -150,7 +150,7 @@ class ClaudeLLMService(LLMService):
         self,
         user_message: str,
         chat_history: list[AnyMessage] = []
-    ) -> tuple[list[AnyMessage, list[dict]]]:
+    ) -> tuple[list[AnyMessage], list[dict]]:
         # Retrieve relevant KB chunks
         context = self.kb_service.search(user_message)
 

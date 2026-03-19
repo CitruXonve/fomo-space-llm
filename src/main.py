@@ -1,7 +1,10 @@
+import redis
 from src.api.chat import router as chat_router, stream_router
+from src.api.context import context_router
 from src.service.session_service import SessionService
 from src.service.llm_service import ClaudeLLMService
 from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
+from src.service.knowledge_file_service import KnowledgeFileService, KnowledgeRegistry
 from src.config.settings import settings
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
@@ -33,6 +36,7 @@ app.add_middleware(
 
 app.include_router(chat_router)
 app.include_router(stream_router)
+app.include_router(context_router)
 
 
 @app.on_event("startup")
@@ -42,6 +46,14 @@ async def startup_event():
     kb_service = KnowledgeBaseServiceMarkdown()
     app.state.llm_service = ClaudeLLMService(kb_service)
     app.state.session_service = SessionService()
+    redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    registry = KnowledgeRegistry(kb_service)
+    app.state.knowledge_file_service = KnowledgeFileService(
+        settings.KB_DIRECTORY,
+        registry,
+        redis_client,
+    )
+    app.state.knowledge_file_service.bootstrap_global()
     logger.info("Resources initialized successfully")
     print("Resources initialized successfully")
 
