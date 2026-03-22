@@ -7,6 +7,7 @@ from langchain.messages import AIMessage
 from langchain_core.messages import HumanMessage
 from src.service.llm_service import ClaudeLLMService, evaluate_confidence
 from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
+from src.utility.content_helper import normalize_content
 from src.utility.spinner import Spinner
 
 
@@ -29,11 +30,12 @@ class TestLLM(unittest.IsolatedAsyncioTestCase):
         assert resp is not None and len(resp) > 0
         chat_history.clear()
         chat_history.extend(resp)
-        evaluation = evaluate_confidence(resp[-1].content, context)
+        last_content = normalize_content(resp[-1].content)
+        evaluation = evaluate_confidence(last_content, context)
         end_time = time.time()
         print(
             f"Time taken to generate response: {(end_time - start_time):.2f} seconds")
-        print("LLM response length:", len(resp[-1].content))
+        print("LLM response length:", len(last_content))
         print(
             "LLM confidence:", json.dumps(evaluation, indent=4))
         return end_time
@@ -69,7 +71,7 @@ class TestLLM(unittest.IsolatedAsyncioTestCase):
         message_chunks = []
         async for message_chunk in self.llm_service.generate_stream_response(user_message, chat_history):
             spinner.spin(type_str="tokens")
-            message_chunks.append(message_chunk.content)
+            message_chunks.append(normalize_content(message_chunk.content))
         end_time = time.time()
         spinner.finish(
             message=f"Done streaming {len(message_chunks)} chunks. Total time taken: {(end_time - start_time):.2f} seconds")

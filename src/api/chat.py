@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from src.service.llm_service import ClaudeLLMService
 from src.service.session_service import SessionService
+from src.utility.content_helper import normalize_content
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 stream_router = APIRouter(prefix="/api/chat-stream", tags=["chat-stream"])
@@ -98,24 +99,6 @@ async def create_chat_stream(
 
     chat_history = session_service.get_history(session_id)
 
-    def _normalize_content(content) -> str:
-        """
-        Extract text from content, handling both str and list-of-blocks formats.
-        LangChain AIMessageChunk.content can be a string or a list of content blocks
-        (e.g. [{"type": "text", "text": "..."}]) when using tools or multi-modal output.
-        """
-        if isinstance(content, str):
-            return f"&nbsp;{content}&nbsp;"
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", "") or "")
-                elif isinstance(block, str):
-                    parts.append(block)
-            return "\n".join(parts)
-        return str(content) if content is not None else ""
-
     def _escape_html(content: str) -> str:
         """
         Escape HTML tags and markdown syntax in the content.
@@ -128,7 +111,7 @@ async def create_chat_stream(
         An async generator that yields LLM tokens formatted as Server-Sent Events (SSE).
         """
         async for message_chunk in llm_service.generate_stream_response(request.message, chat_history):
-            yield _escape_html(_normalize_content(message_chunk.content))
+            yield _escape_html(normalize_content(message_chunk.content))
 
     return StreamingResponse(
         _stream_generator(request, llm_service, chat_history),
