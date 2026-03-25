@@ -11,6 +11,7 @@ Mocking strategy
 """
 
 import hashlib
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,24 +29,32 @@ from src.service.knowledge_file_service import (
 from src.type.enums import ContentFormat, ContextPersistence, ContextScope
 
 
+def _H(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 # Helper factories
 def _make_record(
     filename: str = "doc.md",
     persistence: ContextPersistence = ContextPersistence.PERSISTENT,
     fmt: ContentFormat = ContentFormat.MARKDOWN,
     size_bytes: int = 100,
-    content_hash: str = "abc123",
+    content_hash: str | None = None,
     created_at: str = "2026-01-01T00:00:00+00:00",
     updated_at: str = "2026-01-01T00:00:00+00:00",
+    **kwargs,
 ) -> KnowledgeItemRecord:
+    ch = content_hash if content_hash is not None else _H(
+        b"default-record-bytes")
     return KnowledgeItemRecord(
         filename=filename,
         persistence=persistence,
         format=fmt,
         size_bytes=size_bytes,
-        content_hash=content_hash,
+        content_hash=ch,
         created_at=created_at,
         updated_at=updated_at,
+        **kwargs,
     )
 
 
@@ -94,13 +103,13 @@ class TestKnowledgeMetadataStore(unittest.TestCase):
     def test_load_existing_manifest(self):
         record = _make_record()
         manifest = _make_manifest(scope=ContextScope.GLOBAL, items={
-                                  record.filename: record})
+                                  record.content_hash: record})
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
         result = self.store.load("global", ContextScope.GLOBAL)
 
         self.assertEqual(result.scope, ContextScope.GLOBAL)
-        self.assertIn("doc.md", result.items)
+        self.assertIn(record.content_hash, result.items)
         self.mock_redis.get.assert_called_once_with("kb:manifest:global")
 
     def test_load_missing_key_returns_empty_manifest(self):
@@ -154,8 +163,9 @@ class TestKnowledgeMetadataStore(unittest.TestCase):
 
             result = self.store.bootstrap("global", tmp, ContextScope.GLOBAL)
 
-        self.assertIn("guide.md", result.items)
-        rec = result.items["guide.md"]
+        h = _H(b"# Hello")
+        self.assertIn(h, result.items)
+        rec = result.items[h]
         self.assertEqual(rec.format, ContentFormat.MARKDOWN)
         self.assertEqual(rec.persistence, ContextPersistence.PERSISTENT)
         self.mock_redis.set.assert_called_once()
@@ -163,19 +173,22 @@ class TestKnowledgeMetadataStore(unittest.TestCase):
     def test_bootstrap_skips_already_tracked_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            (tmp / "guide.md").write_bytes(b"# Hello")
+            body = b"# Hello"
+            (tmp / "guide.md").write_bytes(body)
+            h = _H(body)
 
-            # Pre-load manifest that already tracks the file
+            # Pre-load manifest that already tracks the file (hash key)
             existing = _make_manifest(
                 scope=ContextScope.GLOBAL,
-                items={"guide.md": _make_record(filename="guide.md")},
+                items={h: _make_record(
+                    filename="guide.md", content_hash=h, size_bytes=len(body))},
             )
             self.mock_redis.get.return_value = existing.model_dump_json()
 
             result = self.store.bootstrap("global", tmp, ContextScope.GLOBAL)
 
         # File is in manifest but was already there — no new save
-        self.assertIn("guide.md", result.items)
+        self.assertIn(h, result.items)
         self.mock_redis.set.assert_not_called()
 
     def test_bootstrap_ignores_unsupported_extensions(self):
@@ -197,11 +210,59 @@ class TestKnowledgeMetadataStore(unittest.TestCase):
 
             result = self.store.bootstrap("global", tmp, ContextScope.GLOBAL)
 
-        self.assertIn("doc.md", result.items)
-        self.assertIn("notes.txt", result.items)
-        self.assertEqual(result.items["doc.md"].format, ContentFormat.MARKDOWN)
-        self.assertEqual(result.items["notes.txt"].format, ContentFormat.TXT)
+        hm = _H(b"# Markdown")
+        ht = _H(b"plain text")
+        self.assertIn(hm, result.items)
+        self.assertIn(ht, result.items)
+        self.assertEqual(result.items[hm].format, ContentFormat.MARKDOWN)
+        self.assertEqual(result.items[ht].format, ContentFormat.TXT)
         self.mock_redis.set.assert_called_once()
+
+    def test_bootstrap_recursive_registers_nested_relative_filename(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sub = tmp / "notes"
+            sub.mkdir()
+            (sub / "deep.md").write_bytes(b"# Nested")
+
+            result = self.store.bootstrap(
+                "global", tmp, ContextScope.GLOBAL, recursive=True
+            )
+
+        h = _H(b"# Nested")
+        self.assertIn(h, result.items)
+        self.assertEqual(result.items[h].filename, "notes/deep.md")
+        self.mock_redis.set.assert_called_once()
+
+    def test_bootstrap_recursive_skips_content_blobs_subtree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cas = tmp / "_content_blobs"
+            cas.mkdir()
+            (cas / f"{'ab' * 32}.md").write_bytes(b"# blob")
+            vis = tmp / "visible.md"
+            vis.write_bytes(b"# ok")
+
+            result = self.store.bootstrap(
+                "global", tmp, ContextScope.GLOBAL, recursive=True
+            )
+
+        self.assertEqual(len(result.items), 1)
+        self.assertIn(_H(b"# ok"), result.items)
+        self.mock_redis.set.assert_called_once()
+
+    def test_bootstrap_recursive_root_file_uses_basename(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "root.md").write_bytes(b"# root")
+
+            result = self.store.bootstrap(
+                "global", tmp, ContextScope.GLOBAL, recursive=True
+            )
+
+        h = _H(b"# root")
+        self.assertIn(h, result.items)
+        self.assertEqual(result.items[h].filename, "root.md")
 
 
 class TestKnowledgeRegistryScopeHelpers(unittest.TestCase):
@@ -250,27 +311,45 @@ class TestKnowledgeRegistryScopeHelpers(unittest.TestCase):
     def test_scope_directory_global(self):
         result = KnowledgeRegistry.scope_directory(
             "/kb", ContextScope.GLOBAL, None, None)
-        self.assertEqual(result, Path("/kb"))
+        self.assertEqual(result, Path("/kb/_kb_context"))
 
     def test_scope_directory_category(self):
         result = KnowledgeRegistry.scope_directory(
             "/kb", ContextScope.CATEGORY, None, "cat1")
-        self.assertEqual(result, Path("/kb/category/cat1"))
+        self.assertEqual(result, Path("/kb/_kb_context/category/cat1"))
 
     def test_scope_directory_category_default(self):
         result = KnowledgeRegistry.scope_directory(
             "/kb", ContextScope.CATEGORY, None, None)
-        self.assertEqual(result, Path("/kb/category/default"))
+        self.assertEqual(result, Path("/kb/_kb_context/category/default"))
 
     def test_scope_directory_local(self):
         result = KnowledgeRegistry.scope_directory(
             "/kb", ContextScope.LOCAL, "sess1", None)
-        self.assertEqual(result, Path("/kb/session/sess1"))
+        self.assertEqual(result, Path("/kb/_kb_context/session/sess1"))
 
     def test_scope_directory_local_anonymous(self):
         result = KnowledgeRegistry.scope_directory(
             "/kb", ContextScope.LOCAL, None, None)
-        self.assertEqual(result, Path("/kb/session/anonymous"))
+        self.assertEqual(result, Path("/kb/_kb_context/session/anonymous"))
+
+    def test_parse_scope_key_global(self):
+        self.assertEqual(
+            KnowledgeRegistry.parse_scope_key("global"),
+            (ContextScope.GLOBAL, None, None),
+        )
+
+    def test_parse_scope_key_category(self):
+        self.assertEqual(
+            KnowledgeRegistry.parse_scope_key("category:cat9"),
+            (ContextScope.CATEGORY, None, "cat9"),
+        )
+
+    def test_parse_scope_key_session(self):
+        self.assertEqual(
+            KnowledgeRegistry.parse_scope_key("session:s42"),
+            (ContextScope.LOCAL, "s42", None),
+        )
 
 
 class TestKnowledgeFileService(unittest.TestCase):
@@ -315,7 +394,7 @@ class TestKnowledgeFileService(unittest.TestCase):
                 persistence=ContextPersistence.PERSISTENT,
             )
 
-    def test_save_file_creates_file_on_disk(self):
+    def test_save_file_creates_content_addressed_blob(self):
         content = b"# Hello world"
         info = self.svc.save_file(
             filename="new.md",
@@ -324,13 +403,17 @@ class TestKnowledgeFileService(unittest.TestCase):
             persistence=ContextPersistence.PERSISTENT,
         )
 
-        expected_path = Path(self.kb_root) / "new.md"
+        h = _sha256(content)
+        expected_path = (
+            Path(self.kb_root) / "_kb_context" / "_content_blobs" / f"{h}.md"
+        )
         self.assertTrue(expected_path.exists())
         self.assertEqual(expected_path.read_bytes(), content)
+        self.assertFalse((Path(self.kb_root) / "new.md").exists())
         self.assertEqual(info.filename, "new.md")
         self.assertEqual(info.format, ContentFormat.MARKDOWN)
         self.assertEqual(info.size_bytes, len(content))
-        self.assertEqual(info.content_hash, _sha256(content))
+        self.assertEqual(info.content_hash, h)
 
     def test_save_file_new_record_has_matching_created_and_updated_at(self):
         info = self.svc.save_file(
@@ -341,20 +424,50 @@ class TestKnowledgeFileService(unittest.TestCase):
         )
         self.assertEqual(info.created_at, info.updated_at)
 
-    def test_save_file_updates_existing_record_preserves_created_at(self):
+    def test_save_file_same_content_preserves_created_at(self):
+        body = b"unchanged body"
+        h = _sha256(body)
         old_record = _make_record(
-            filename="update_me.md",
-            content_hash="oldhash",
+            filename="same.md",
+            content_hash=h,
             created_at="2025-01-01T00:00:00+00:00",
             updated_at="2025-01-01T00:00:00+00:00",
+            size_bytes=len(body),
         )
         old_manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"update_me.md": old_record},
+            items={h: old_record},
+        )
+        self.mock_redis.get.return_value = old_manifest.model_dump_json()
+
+        info = self.svc.save_file(
+            filename="same.md",
+            content=body,
+            scope=ContextScope.GLOBAL,
+            persistence=ContextPersistence.PERSISTENT,
+        )
+
+        self.assertEqual(info.created_at, "2025-01-01T00:00:00+00:00")
+        self.assertEqual(info.content_hash, h)
+
+    def test_save_file_replace_same_filename_new_content_drops_old_hash(self):
+        old_c = b"old body"
+        old_h = _sha256(old_c)
+        old_record = _make_record(
+            filename="update_me.md",
+            content_hash=old_h,
+            created_at="2025-01-01T00:00:00+00:00",
+            updated_at="2025-01-01T00:00:00+00:00",
+            size_bytes=len(old_c),
+        )
+        old_manifest = _make_manifest(
+            scope=ContextScope.GLOBAL,
+            items={old_h: old_record},
         )
         self.mock_redis.get.return_value = old_manifest.model_dump_json()
 
         new_content = b"updated content"
+        new_h = _sha256(new_content)
         info = self.svc.save_file(
             filename="update_me.md",
             content=new_content,
@@ -362,10 +475,8 @@ class TestKnowledgeFileService(unittest.TestCase):
             persistence=ContextPersistence.PERSISTENT,
         )
 
-        # created_at must be preserved; updated_at and hash must change
-        self.assertEqual(info.created_at, "2025-01-01T00:00:00+00:00")
-        self.assertNotEqual(info.updated_at, "2025-01-01T00:00:00+00:00")
-        self.assertEqual(info.content_hash, _sha256(new_content))
+        self.assertEqual(info.content_hash, new_h)
+        self.assertNotEqual(info.created_at, old_record.created_at)
 
     def test_save_file_global_calls_invalidate_global(self):
         self.svc.save_file(
@@ -376,6 +487,33 @@ class TestKnowledgeFileService(unittest.TestCase):
         )
         self.mock_registry.invalidate_global.assert_called_once()
         self.mock_registry.invalidate.assert_not_called()
+
+    def test_save_file_same_content_second_upload_updates_display_name(self):
+        kv: dict[str, str | None] = {}
+        self.mock_redis.get.side_effect = lambda k: kv.get(k)
+        self.mock_redis.set.side_effect = lambda k, v: kv.__setitem__(k, v)
+
+        content = b"# shared body\n"
+        h = _sha256(content)
+        blob = (
+            Path(self.kb_root) / "_kb_context" / "_content_blobs" / f"{h}.md"
+        )
+
+        self.svc.save_file(
+            "one.md", content, ContextScope.GLOBAL, ContextPersistence.PERSISTENT
+        )
+        self.svc.save_file(
+            "two.md", content, ContextScope.GLOBAL, ContextPersistence.PERSISTENT
+        )
+
+        self.assertTrue(blob.is_file())
+        self.assertEqual(blob.read_bytes(), content)
+        saved = KnowledgeManifest.model_validate_json(kv["kb:manifest:global"])
+        self.assertEqual(len(saved.items), 1)
+        self.assertEqual(saved.items[h].filename, "two.md")
+
+        self.svc.delete_file(h, ContextScope.GLOBAL)
+        self.assertFalse(blob.exists())
 
     def test_save_file_local_calls_invalidate_with_scope_key(self):
         self.svc.save_file(
@@ -399,73 +537,193 @@ class TestKnowledgeFileService(unittest.TestCase):
         key, json_str = self.mock_redis.set.call_args[0]
         self.assertEqual(key, "kb:manifest:global")
         saved = KnowledgeManifest.model_validate_json(json_str)
-        self.assertIn("persist.md", saved.items)
+        h = _sha256(b"data")
+        self.assertIn(h, saved.items)
+        self.assertEqual(
+            saved.items[h].storage_relpath,
+            f"_content_blobs/{h}.md",
+        )
 
     def test_delete_file_existing_returns_true(self):
-        # Create file on disk first
-        target = Path(self.kb_root) / "to_delete.md"
-        target.write_bytes(b"bye")
+        content = b"bye"
+        h = _sha256(content)
+        blob = (
+            Path(self.kb_root) / "_kb_context" / "_content_blobs" / f"{h}.md"
+        )
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(content)
 
-        record = _make_record(filename="to_delete.md")
+        record = _make_record(
+            filename="to_delete.md",
+            content_hash=h,
+            size_bytes=len(content),
+            storage_relpath=f"_content_blobs/{h}.md",
+        )
         manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"to_delete.md": record},
+            items={h: record},
         )
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
-        result = self.svc.delete_file("to_delete.md", ContextScope.GLOBAL)
+        result = self.svc.delete_file(h, ContextScope.GLOBAL)
 
         self.assertTrue(result)
-        self.assertFalse(target.exists())
+        self.assertFalse(blob.exists())
         self.mock_redis.set.assert_called_once()  # manifest updated
 
     def test_delete_file_missing_returns_false(self):
-        result = self.svc.delete_file("ghost.md", ContextScope.GLOBAL)
+        ghost_h = "0" * 64
+        result = self.svc.delete_file(ghost_h, ContextScope.GLOBAL)
 
         self.assertFalse(result)
         self.mock_redis.set.assert_not_called()
 
     def test_delete_file_global_calls_invalidate_global(self):
-        target = Path(self.kb_root) / "del_global.md"
-        target.write_bytes(b"x")
+        content = b"x"
+        h = _sha256(content)
+        blob = (
+            Path(self.kb_root) / "_kb_context" / "_content_blobs" / f"{h}.md"
+        )
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(content)
         self.mock_redis.get.return_value = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"del_global.md": _make_record(filename="del_global.md")},
+            items={
+                h: _make_record(
+                    filename="del_global.md",
+                    content_hash=h,
+                    size_bytes=len(content),
+                    storage_relpath=f"_content_blobs/{h}.md",
+                ),
+            },
         ).model_dump_json()
 
-        self.svc.delete_file("del_global.md", ContextScope.GLOBAL)
+        self.svc.delete_file(h, ContextScope.GLOBAL)
 
         self.mock_registry.invalidate_global.assert_called_once()
 
     def test_get_file_info_returns_correct_file_info(self):
-        target = Path(self.kb_root) / "info.md"
-        target.write_bytes(b"content")
+        content = b"content"
+        h = _sha256(content)
+        blob = (
+            Path(self.kb_root) / "_kb_context" / "_content_blobs" / f"{h}.md"
+        )
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(content)
 
-        record = _make_record(filename="info.md")
+        record = _make_record(
+            filename="info.md",
+            content_hash=h,
+            size_bytes=len(content),
+            storage_relpath=f"_content_blobs/{h}.md",
+        )
         manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"info.md": record},
+            items={h: record},
         )
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
-        info = self.svc.get_file_info("info.md", ContextScope.GLOBAL)
+        info = self.svc.get_file_info(h, ContextScope.GLOBAL)
 
         self.assertIsNotNone(info)
         self.assertEqual(info.filename, "info.md")
         self.assertEqual(info.scope, ContextScope.GLOBAL)
         self.assertEqual(info.format, ContentFormat.MARKDOWN)
 
+    def test_get_file_info_resolves_legacy_flat_blob_in_scope_dir(self):
+        """Very old layout: hash file at scope root while manifest used blob-prefix relpath."""
+        content = b"legacy layout"
+        h = _sha256(content)
+        legacy_blob = (
+            Path(self.kb_root)
+            / "_objects"
+            / f"{h}.md"
+        )
+        legacy_blob.parent.mkdir(parents=True, exist_ok=True)
+        legacy_blob.write_bytes(content)
+
+        record = _make_record(
+            filename="legacy.md",
+            content_hash=h,
+            size_bytes=len(content),
+            storage_relpath=f"_objects/{h}.md",
+        )
+        manifest = _make_manifest(
+            scope=ContextScope.GLOBAL,
+            items={h: record},
+        )
+        self.mock_redis.get.return_value = manifest.model_dump_json()
+
+        info = self.svc.get_file_info(h, ContextScope.GLOBAL)
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info.filename, "legacy.md")
+        legacy_blob.unlink()
+
+    def test_get_file_info_resolves_legacy_double_segment_cas_path(self):
+        """Pre-rename tree: only ``_objects`` scope root and nested CAS path."""
+        content = b"nested legacy blob"
+        h = _sha256(content)
+        blob = Path(self.kb_root) / "_objects" / "_objects" / f"{h}.md"
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(content)
+
+        record = _make_record(
+            filename="nested.md",
+            content_hash=h,
+            size_bytes=len(content),
+            storage_relpath=f"_objects/{h}.md",
+        )
+        manifest = _make_manifest(
+            scope=ContextScope.GLOBAL,
+            items={h: record},
+        )
+        self.mock_redis.get.return_value = manifest.model_dump_json()
+
+        info = self.svc.get_file_info(h, ContextScope.GLOBAL)
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info.filename, "nested.md")
+        blob.unlink()
+
+    def test_iter_kb_sources_finds_bootstrap_legacy_file_at_kb_root(self):
+        """Bootstrap registers global files from KB_DIRECTORY root (no storage_relpath)."""
+        pdf_name = "root_doc.pdf"
+        pdf_path = Path(self.kb_root) / pdf_name
+        body = b"%PDF-1.4 minimal"
+        pdf_path.write_bytes(body)
+        h = _sha256(body)
+        record = _make_record(
+            filename=pdf_name,
+            content_hash=h,
+            size_bytes=len(body),
+            fmt=ContentFormat.PDF,
+            storage_relpath=None,
+        )
+        manifest = _make_manifest(
+            scope=ContextScope.GLOBAL,
+            items={h: record},
+        )
+        self.mock_redis.get.return_value = manifest.model_dump_json()
+
+        sources = self.svc.iter_kb_sources(ContextScope.GLOBAL, None, None)
+
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0][0], pdf_name)
+        self.assertEqual(sources[0][1].resolve(), pdf_path.resolve())
+        pdf_path.unlink()
+
     def test_get_file_info_missing_file_returns_none(self):
-        result = self.svc.get_file_info("no_such_file.md", ContextScope.GLOBAL)
+        result = self.svc.get_file_info("f" * 64, ContextScope.GLOBAL)
         self.assertIsNone(result)
 
     def test_get_file_info_not_in_manifest_returns_none(self):
-        # File exists on disk but is not in the Redis manifest
         orphan = Path(self.kb_root) / "orphan.md"
         orphan.write_bytes(b"orphan")
         # manifest is empty (mock_redis.get returns None → empty manifest)
 
-        result = self.svc.get_file_info("orphan.md", ContextScope.GLOBAL)
+        result = self.svc.get_file_info(
+            _sha256(b"orphan"), ContextScope.GLOBAL)
 
         self.assertIsNone(result)
         orphan.unlink()  # cleanup
@@ -474,7 +732,7 @@ class TestKnowledgeFileService(unittest.TestCase):
         record = _make_record(filename="listed.md")
         manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"listed.md": record},
+            items={record.content_hash: record},
         )
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
@@ -484,11 +742,29 @@ class TestKnowledgeFileService(unittest.TestCase):
         self.assertEqual(results[0].filename, "listed.md")
         self.assertEqual(results[0].scope, ContextScope.GLOBAL)
 
+    def test_list_files_sync_discovers_nested_under_kb_context(self):
+        ctx = Path(self.kb_root) / "_kb_context"
+        nested = ctx / "folder"
+        nested.mkdir(parents=True)
+        body = b"# nested for list"
+        (nested / "doc.md").write_bytes(body)
+        h = _sha256(body)
+        kv: dict[str, str | None] = {}
+        self.mock_redis.get.side_effect = lambda k: kv.get(k)
+        self.mock_redis.set.side_effect = lambda k, v: kv.__setitem__(k, v)
+
+        results = self.svc.list_files(ContextScope.GLOBAL)
+
+        match = [r for r in results if r.content_hash == h]
+        self.assertEqual(len(match), 1)
+        self.assertEqual(match[0].filename, "folder/doc.md")
+        shutil.rmtree(ctx, ignore_errors=True)
+
     def test_list_files_include_higher_scopes_adds_global(self):
         global_record = _make_record(filename="global_doc.md")
         global_manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"global_doc.md": global_record},
+            items={global_record.content_hash: global_record},
         )
 
         def get_side_effect(key):
@@ -512,13 +788,13 @@ class TestKnowledgeFileService(unittest.TestCase):
         global_record = _make_record(filename="global_only.md")
         global_manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"global_only.md": global_record},
+            items={global_record.content_hash: global_record},
         )
 
         local_record = _make_record(filename="local_only.md")
         local_manifest = _make_manifest(
             scope=ContextScope.LOCAL,
-            items={"local_only.md": local_record},
+            items={local_record.content_hash: local_record},
         )
 
         def get_side_effect(key):
@@ -540,7 +816,7 @@ class TestKnowledgeFileService(unittest.TestCase):
         record = _make_record(filename="stats.md", size_bytes=512)
         manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"stats.md": record},
+            items={record.content_hash: record},
         )
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
@@ -567,7 +843,7 @@ class TestKnowledgeFileService(unittest.TestCase):
         )
         manifest = _make_manifest(
             scope=ContextScope.GLOBAL,
-            items={"eph.md": ephemeral_rec},
+            items={ephemeral_rec.content_hash: ephemeral_rec},
         )
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
@@ -576,24 +852,36 @@ class TestKnowledgeFileService(unittest.TestCase):
         self.assertEqual(stats["ephemeral_file_count"], 1)
 
     def test_cleanup_ephemeral_deletes_only_ephemeral_files(self):
-        sess_dir = Path(self.kb_root) / "session" / "cleanup_sess"
+        sess_dir = (
+            Path(self.kb_root) / "_kb_context" / "session" / "cleanup_sess"
+        )
         sess_dir.mkdir(parents=True, exist_ok=True)
 
         eph_file = sess_dir / "temp.md"
         keep_file = sess_dir / "keep.md"
-        eph_file.write_bytes(b"ephemeral")
-        keep_file.write_bytes(b"persistent")
+        eph_body = b"ephemeral"
+        keep_body = b"persistent"
+        eph_file.write_bytes(eph_body)
+        keep_file.write_bytes(keep_body)
+        he = _sha256(eph_body)
+        hk = _sha256(keep_body)
 
         eph_rec = _make_record(
-            filename="temp.md", persistence=ContextPersistence.EPHEMERAL
+            filename="temp.md",
+            persistence=ContextPersistence.EPHEMERAL,
+            content_hash=he,
+            size_bytes=len(eph_body),
         )
         keep_rec = _make_record(
-            filename="keep.md", persistence=ContextPersistence.PERSISTENT
+            filename="keep.md",
+            persistence=ContextPersistence.PERSISTENT,
+            content_hash=hk,
+            size_bytes=len(keep_body),
         )
         manifest = KnowledgeManifest(
             scope=ContextScope.LOCAL,
             session_id="cleanup_sess",
-            items={"temp.md": eph_rec, "keep.md": keep_rec},
+            items={he: eph_rec, hk: keep_rec},
         )
         self.mock_redis.get.return_value = manifest.model_dump_json()
 
@@ -615,7 +903,7 @@ class TestKnowledgeFileService(unittest.TestCase):
         self.assertEqual(count, 0)
         self.mock_redis.set.assert_not_called()
 
-    def test_bootstrap_global_registers_pre_existing_file(self):
+    def test_bootstrap_global_registers_pre_existing_file_under_kb_root(self):
         # Place a file in the kb_root before bootstrap
         pre_existing = Path(self.kb_root) / "pre_existing.md"
         pre_existing.write_bytes(b"# Pre-existing")
@@ -624,6 +912,23 @@ class TestKnowledgeFileService(unittest.TestCase):
 
         # Redis SET must have been called (file was discovered and saved)
         self.mock_redis.set.assert_called()
+        key = self.mock_redis.set.call_args[0][0]
+        self.assertEqual(key, "kb:manifest:global")
+
+        # cleanup to not affect other tests
+        pre_existing.unlink()
+
+    def test_bootstrap_global_registers_pre_existing_file_under_kb_context(self):
+        # Place a file in the kb_context before bootstrap
+        kb_context = Path(self.kb_root) / "_kb_context"
+        kb_context.mkdir(parents=True, exist_ok=True)
+        pre_existing = kb_context / "pre_existing.md"
+        pre_existing.write_bytes(b"# Pre-existing")
+
+        self.svc.bootstrap_global()
+
+        # Redis SET must have been called (file was discovered and saved)
+
         key = self.mock_redis.set.call_args[0][0]
         self.assertEqual(key, "kb:manifest:global")
 

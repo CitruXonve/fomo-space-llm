@@ -22,6 +22,10 @@ test-kstore:
 test-all:
 	@python -m unittest tests/*.py
 
+upload-kstore:
+	@test -n "$(FILE)" || (echo "usage: make upload-kstore FILE=path/to/file.md" && exit 1)
+	@poetry run python scripts/upload_context_file.py "$(FILE)"
+
 redis-up:
 	@docker run -d --name redis-server -p 6379:6379 redis
 
@@ -60,7 +64,7 @@ build-server:
 	@docker-compose build
 
 start-server-local:
-	@make prepare-server && fastapi run src/main.py
+	@make prepare-server && make redis-up && fastapi run src/main.py
 
 debug-server:
 	fastapi dev src/main.py --reload

@@ -3,6 +3,9 @@
 # VSCode
 .vscode/
 
+# Cursor
+.cursor/
+
 # Claude Code
 .claude/
 

@@ -16,7 +16,7 @@ import numpy as np
 import logging
 from abc import ABC, abstractmethod
 
-from typing import Optional
+from typing import Optional, Sequence
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -91,9 +91,16 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
     """
     embeddings: Optional[np.ndarray]
 
-    def __init__(self, kb_directory: str | None = None, cache_prefix: str = ""):
+    def __init__(
+        self,
+        kb_directory: str | None = None,
+        cache_prefix: str = "",
+        file_sources: Sequence[tuple[str, Path]] | None = None,
+    ):
         self.kb_directory = Path(kb_directory) if kb_directory else Path(
             settings.KB_DIRECTORY)
+        # When set, load only these (logical_name, path) pairs instead of globbing.
+        self._file_sources: Sequence[tuple[str, Path]] | None = file_sources
         self.chunk_size = settings.EMBEDDING_MODEL_CHUNK_SIZE
         self.chunk_overlap = settings.EMBEDDING_MODEL_CHUNK_OVERLAP
 
@@ -120,19 +127,28 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         # Compute current KB hash
         current_hash = self._compute_kb_hash()
 
-        # Try to load from cache if KB unchanged
+        # Try to load from cache if KB unchanged;
+        # Otherwise, leave it as-is for lazy-loading or on-demand loading
         if self._load_from_cache(current_hash):
             logger.info(f"Loaded {len(self.chunks)} chunks from cache")
-        else:
-            # Load and process knowledge base from scratch
-            logger.info("Cache miss or invalid - regenerating embeddings...")
-            self._load_knowledge_base()
-            self._create_embeddings()
-            self._save_to_cache(current_hash)
-            logger.info(f"Knowledge base loaded: {len(self.chunks)} chunks")
+
+    def refresh_embeddings(self, current_hash: Optional[str] = None) -> str:
+        """Refresh embeddings for the knowledge base"""
+        hash = current_hash or self._compute_kb_hash()
+        if self._load_from_cache(hash):
+            return hash
+        # Full reload must replace in-memory chunks; _load_knowledge_base only appends.
+        self.chunks = []
+        self._load_knowledge_base()
+        self._create_embeddings()
+        self._save_to_cache(hash)
+        logger.info(
+            f"Knowledge base loaded and embeddings refreshed successfully: {len(self.chunks)} chunks")
+        return hash
 
     def get_all_sources(self) -> list[str]:
         """Get list of all source files in KB"""
+        self.refresh_embeddings()
         return list(set(chunk.source_file for chunk in self.chunks))
 
     def get_chunk_by_index(self, index: int) -> Optional[MarkdownChunk]:
@@ -143,6 +159,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
 
     def get_stats(self) -> dict:
         """Get knowledge base statistics"""
+        self.refresh_embeddings()
         return {
             "total_chunks": len(self.chunks),
             "total_sources": len(self.get_all_sources()),
@@ -156,15 +173,28 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         Compute a hash of the KB directory state.
         Uses file names, sizes, and modification times to detect changes.
         """
-        if not self.kb_directory.exists():
-            return ""
+        hash_data: list[str] = []
 
-        hash_data = []
-        md_files = sorted(self.kb_directory.glob("*.md"))
+        if self._file_sources is not None:
+            hash_data.append("mode:manifest")
+            for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
+                if path.is_file():
+                    stat = path.stat()
+                    hash_data.append(
+                        f"{logical}:{path.resolve()}:{stat.st_size}:{stat.st_mtime}"
+                    )
+                else:
+                    hash_data.append(f"{logical}:missing")
+        else:
+            if not self.kb_directory.exists():
+                return ""
 
-        for md_file in md_files:
-            stat = md_file.stat()
-            hash_data.append(f"{md_file.name}:{stat.st_size}:{stat.st_mtime}")
+            hash_data.append("mode:glob")
+            md_files = sorted(self.kb_directory.glob("*.md"))
+            for md_file in md_files:
+                stat = md_file.stat()
+                hash_data.append(
+                    f"{md_file.name}:{stat.st_size}:{stat.st_mtime}")
 
         # Also include chunk settings in hash (if settings change, re-embed)
         hash_data.append(f"chunk_size:{self.chunk_size}")
@@ -242,6 +272,28 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
 
     def _load_knowledge_base(self) -> None:
         """Load all markdown files from the knowledge base directory"""
+        if self._file_sources is not None:
+            if not self._file_sources:
+                logger.warning("No manifest-driven KB sources to load")
+                return
+            for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
+                if not path.is_file():
+                    logger.warning(
+                        "Skipping missing KB file for logical name '%s': %s",
+                        logical,
+                        path,
+                    )
+                    continue
+                if path.suffix.lower() != ".md":
+                    logger.warning(
+                        "Skipping non-markdown source '%s' for logical name '%s'",
+                        path,
+                        logical,
+                    )
+                    continue
+                self._process_markdown_file(path, source_name=logical)
+            return
+
         if not self.kb_directory.exists():
             raise FileNotFoundError(
                 f"Knowledge base directory not found: {self.kb_directory}")
@@ -249,14 +301,18 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         md_files = list(self.kb_directory.glob("*.md"))
 
         if not md_files:
-            raise ValueError(f"No markdown files found in {self.kb_directory}")
+            logger.warning(f"No markdown files found in {self.kb_directory}")
+            return
+        #     raise ValueError(f"No markdown files found in {self.kb_directory}")
 
         logger.info(f"Found {len(md_files)} markdown files")
 
         for md_file in md_files:
             self._process_markdown_file(md_file)
 
-    def _process_markdown_file(self, file_path: Path) -> None:
+    def _process_markdown_file(
+        self, file_path: Path, source_name: str | None = None
+    ) -> None:
         """
         Process a single markdown file into chunks.
 
@@ -283,7 +339,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
 
                 chunk = MarkdownChunk(
                     content=chunk_with_context,
-                    source_file=file_path.name,
+                    source_file=source_name or file_path.name,
                     heading=heading,
                     chunk_index=section_index *
                     len(section_chunks) + chunk_index
@@ -464,6 +520,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         Returns:
             List of chunk dictionaries with similarity scores
         """
+        self.refresh_embeddings()
         if not self.chunks or self.embeddings is None:
             logger.error("Knowledge base not initialized")
             return []
@@ -508,12 +565,57 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseServiceMarkdown):
     def _load_knowledge_base(self) -> None:
         from src.service.file_parser import ParserFactory
         factory = ParserFactory()
+        supported_suffixes = {".md", ".pdf", ".txt"}
+
+        if self._file_sources is not None:
+            if not self._file_sources:
+                logger.warning("No manifest-driven KB sources (multi-format)")
+                return
+            for logical, file_path in sorted(self._file_sources, key=lambda x: x[0]):
+                if not file_path.is_file():
+                    logger.warning(
+                        "Skipping missing KB file for logical name '%s': %s",
+                        logical,
+                        file_path,
+                    )
+                    continue
+                if file_path.suffix.lower() not in supported_suffixes:
+                    logger.warning(
+                        "Skipping unsupported suffix for logical name '%s': %s",
+                        logical,
+                        file_path,
+                    )
+                    continue
+                try:
+                    sections = factory.parse_file(file_path)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse %s (logical '%s'): %s",
+                        file_path,
+                        logical,
+                        e,
+                    )
+                    continue
+
+                for section_index, (heading, section_content) in enumerate(sections):
+                    section_chunks = self._chunk_section(section_content)
+                    for chunk_index, chunk_text in enumerate(section_chunks):
+                        chunk_with_context = self._add_context(
+                            heading, chunk_text)
+                        chunk = MarkdownChunk(
+                            content=chunk_with_context,
+                            source_file=logical,
+                            heading=heading,
+                            chunk_index=section_index *
+                            len(section_chunks) + chunk_index,
+                        )
+                        self.chunks.append(chunk)
+            return
 
         if not self.kb_directory.exists():
             raise FileNotFoundError(
                 f"Knowledge base directory not found: {self.kb_directory}")
 
-        supported_suffixes = {".md", ".pdf", ".txt"}
         all_files = [
             f for f in sorted(self.kb_directory.iterdir())
             if f.is_file() and f.suffix.lower() in supported_suffixes
@@ -547,11 +649,27 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseServiceMarkdown):
 
     def _compute_kb_hash(self) -> str:
         """Override to include all supported file types in the hash."""
+        supported_suffixes = {".md", ".pdf", ".txt"}
+
+        if self._file_sources is not None:
+            hash_data = ["mode:manifest_mf"]
+            for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
+                if path.is_file():
+                    stat = path.stat()
+                    hash_data.append(
+                        f"{logical}:{path.resolve()}:{stat.st_size}:{stat.st_mtime}"
+                    )
+                else:
+                    hash_data.append(f"{logical}:missing")
+            hash_data.append(f"chunk_size:{self.chunk_size}")
+            hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
+            hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
+            return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
+
         if not self.kb_directory.exists():
             return ""
 
-        supported_suffixes = {".md", ".pdf", ".txt"}
-        hash_data = []
+        hash_data = ["mode:iterdir_mf"]
         for f in sorted(self.kb_directory.iterdir()):
             if f.is_file() and f.suffix.lower() in supported_suffixes:
                 stat = f.stat()

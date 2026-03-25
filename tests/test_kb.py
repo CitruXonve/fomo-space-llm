@@ -1,7 +1,7 @@
 import json
 import time
 from src.config.settings import settings
-from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
+from src.service.knowledge_base import KnowledgeBaseServiceMarkdown, KnowledgeBaseServiceMultiFormat
 import unittest
 
 
@@ -12,7 +12,8 @@ class TestKBService(unittest.TestCase):
     def setUpClass(cls):
         """Run once before all tests in this class."""
         start_time = time.time()
-        cls.kb_service = KnowledgeBaseServiceMarkdown()
+        cls.kb_service = KnowledgeBaseServiceMultiFormat()
+        cls.kb_service.get_all_sources()
         end_time = time.time()
         print(
             f"Time taken to initialize knowledge base with embeddings: {end_time - start_time} seconds")

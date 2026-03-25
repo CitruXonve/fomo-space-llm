@@ -11,9 +11,15 @@ Approach
 - Each test class resets the mock in setUp() so tests are independent.
 """
 
+import hashlib
 import io
 import unittest
 from unittest.mock import MagicMock
+
+# Valid 64-char SHA-256 hex for path params on GET/DELETE /api/context/{content_hash}
+_CTX_HASH = hashlib.sha256(b"context-test").hexdigest()
+_CTX_HASH_2 = hashlib.sha256(b"context-test-2").hexdigest()
+_MISSING_HASH = "0" * 64
 
 from fastapi.testclient import TestClient
 
@@ -30,18 +36,19 @@ def _make_file_info(
     persistence: ContextPersistence = ContextPersistence.PERSISTENT,
     fmt: ContentFormat = ContentFormat.MARKDOWN,
     size_bytes: int = 128,
-    content_hash: str = "deadbeef",
+    content_hash: str | None = None,
     created_at: str = "2026-01-01T00:00:00+00:00",
     updated_at: str = "2026-01-01T00:00:00+00:00",
     **kwargs,
 ) -> FileInfo:
+    ch = content_hash if content_hash is not None else _CTX_HASH
     return FileInfo(
         filename=filename,
         scope=scope,
         persistence=persistence,
         format=fmt,
         size_bytes=size_bytes,
-        content_hash=content_hash,
+        content_hash=ch,
         created_at=created_at,
         updated_at=updated_at,
         **kwargs,
@@ -300,7 +307,7 @@ class TestGetKBStats(unittest.TestCase):
         self.assertEqual(stats["total_bytes"], 1024)
 
 
-# GET /api/context/{filename}
+# GET /api/context/{content_hash}
 class TestGetKBFile(unittest.TestCase):
 
     @classmethod
@@ -319,9 +326,10 @@ class TestGetKBFile(unittest.TestCase):
         self.mock_svc.get_file_info.return_value = None
 
     def test_get_existing_file_returns_200(self):
+        h = hashlib.sha256(b"guide").hexdigest()
         self.mock_svc.get_file_info.return_value = _make_file_info(
-            filename="guide.md")
-        resp = self.client.get("/api/context/guide.md")
+            filename="guide.md", content_hash=h)
+        resp = self.client.get(f"/api/context/{h}")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["status"], "success")
@@ -329,26 +337,31 @@ class TestGetKBFile(unittest.TestCase):
 
     def test_get_missing_file_returns_404(self):
         self.mock_svc.get_file_info.return_value = None
-        resp = self.client.get("/api/context/missing.md")
+        resp = self.client.get(f"/api/context/{_MISSING_HASH}")
         self.assertEqual(resp.status_code, 404)
+
+    def test_get_invalid_hash_returns_400(self):
+        resp = self.client.get("/api/context/not-a-sha256")
+        self.assertEqual(resp.status_code, 400)
 
     def test_get_passes_scope_and_ids_to_service(self):
         self.mock_svc.get_file_info.return_value = _make_file_info()
         self.client.get(
-            "/api/context/doc.md?scope=local&session_id=s1&category_id=c1")
+            f"/api/context/{_CTX_HASH}?scope=local&session_id=s1&category_id=c1")
         _, kwargs = self.mock_svc.get_file_info.call_args
+        self.assertEqual(kwargs["content_hash"], _CTX_HASH)
         self.assertEqual(kwargs["scope"], ContextScope.LOCAL)
         self.assertEqual(kwargs["session_id"], "s1")
         self.assertEqual(kwargs["category_id"], "c1")
 
     def test_get_default_scope_is_global(self):
         self.mock_svc.get_file_info.return_value = _make_file_info()
-        self.client.get("/api/context/doc.md")
+        self.client.get(f"/api/context/{_CTX_HASH}")
         _, kwargs = self.mock_svc.get_file_info.call_args
         self.assertEqual(kwargs["scope"], ContextScope.GLOBAL)
 
 
-# DELETE /api/context/{filename}
+# DELETE /api/context/{content_hash}
 class TestDeleteKBFile(unittest.TestCase):
 
     @classmethod
@@ -367,33 +380,34 @@ class TestDeleteKBFile(unittest.TestCase):
         self.mock_svc.delete_file.return_value = True
 
     def test_delete_existing_file_returns_204(self):
-        resp = self.client.delete("/api/context/doc.md")
+        resp = self.client.delete(f"/api/context/{_CTX_HASH}")
         self.assertEqual(resp.status_code, 204)
 
     def test_delete_missing_file_returns_404(self):
         self.mock_svc.delete_file.return_value = False
-        resp = self.client.delete("/api/context/ghost.md")
+        resp = self.client.delete(f"/api/context/{_MISSING_HASH}")
         self.assertEqual(resp.status_code, 404)
 
-    def test_delete_passes_filename_scope_ids_to_service(self):
-        self.client.delete("/api/context/report.md?scope=local&session_id=s1")
+    def test_delete_passes_content_hash_scope_ids_to_service(self):
+        self.client.delete(
+            f"/api/context/{_CTX_HASH_2}?scope=local&session_id=s1")
         _, kwargs = self.mock_svc.delete_file.call_args
-        self.assertEqual(kwargs["filename"], "report.md")
+        self.assertEqual(kwargs["content_hash"], _CTX_HASH_2)
         self.assertEqual(kwargs["scope"], ContextScope.LOCAL)
         self.assertEqual(kwargs["session_id"], "s1")
 
     def test_delete_local_without_session_id_returns_400(self):
-        resp = self.client.delete("/api/context/doc.md?scope=local")
+        resp = self.client.delete(f"/api/context/{_CTX_HASH}?scope=local")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("session_id", resp.json()["detail"])
 
     def test_delete_category_without_category_id_returns_400(self):
-        resp = self.client.delete("/api/context/doc.md?scope=category")
+        resp = self.client.delete(f"/api/context/{_CTX_HASH}?scope=category")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("category_id", resp.json()["detail"])
 
     def test_delete_default_scope_is_global(self):
-        self.client.delete("/api/context/doc.md")
+        self.client.delete(f"/api/context/{_CTX_HASH}")
         _, kwargs = self.mock_svc.delete_file.call_args
         self.assertEqual(kwargs["scope"], ContextScope.GLOBAL)
 

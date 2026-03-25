@@ -11,6 +11,7 @@ from src.type.enums import ContextPersistence, ContextScope
 context_router = APIRouter(prefix="/api/context", tags=["context"])
 
 _SAFE_FILENAME_RE = re.compile(r'^[\w\-. ]+$')
+_SHA256_HEX_LEN = 64
 
 
 # Dependency
@@ -19,6 +20,19 @@ def get_knowledge_file_service(request: Request) -> KnowledgeFileService:
 
 
 # Helpers
+def _parse_content_hash(content_hash: str) -> str:
+    h = content_hash.lower().strip()
+    if (
+        len(h) != _SHA256_HEX_LEN
+        or any(c not in "0123456789abcdef" for c in h)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid content_hash: expected 64-character lowercase SHA-256 hex",
+        )
+    return h
+
+
 def _validate_scope_context(scope: ContextScope, session_id: str | None, category_id: str | None) -> None:
     if scope == ContextScope.LOCAL and not session_id:
         raise HTTPException(
@@ -33,8 +47,8 @@ def _validate_scope_context(scope: ContextScope, session_id: str | None, categor
 
 
 # Endpoints
-# NOTE: /stats and /upload are declared BEFORE /{filename} to prevent FastAPI
-# from treating "stats" or "upload" as a filename path parameter.
+# NOTE: /stats and /upload are declared BEFORE /{content_hash} to prevent FastAPI
+# from treating "stats" or "upload" as path parameters.
 @context_router.get("", status_code=status.HTTP_200_OK)
 async def list_knowledge_files(
     scope: ContextScope = Query(default=ContextScope.GLOBAL),
@@ -105,8 +119,8 @@ async def upload_knowledge_file(
     content = await file.read()
     if len(content) > settings.KB_MAX_UPLOAD_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File too large. Maximum allowed size is {settings.KB_MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"File too large ({len(content)} bytes). Maximum allowed size is {settings.KB_MAX_UPLOAD_BYTES} bytes.",
         )
 
     # Parse optional tags (JSON array)
@@ -160,9 +174,9 @@ async def get_kb_stats(
     return {"status": "success", "stats": stats}
 
 
-@context_router.get("/{filename}", status_code=status.HTTP_200_OK)
+@context_router.get("/{content_hash}", status_code=status.HTTP_200_OK)
 async def get_knowledge_file(
-    filename: str,
+    content_hash: str,
     scope: ContextScope = Query(default=ContextScope.GLOBAL),
     session_id: Optional[str] = Query(default=None),
     category_id: Optional[str] = Query(default=None),
@@ -170,12 +184,14 @@ async def get_knowledge_file(
         get_knowledge_file_service),
 ):
     """
-    GET /api/context/{filename}
+    GET /api/context/{content_hash}
 
-    Return metadata for a specific knowledge file.
+    Return metadata for a knowledge item. *content_hash* is the SHA-256 hex
+    manifest id (same as ``file.content_hash`` from list/upload responses).
     """
+    h = _parse_content_hash(content_hash)
     file_info = knowledge_file_service.get_file_info(
-        filename=filename,
+        content_hash=h,
         scope=scope,
         session_id=session_id,
         category_id=category_id,
@@ -186,9 +202,9 @@ async def get_knowledge_file(
     return {"status": "success", "file": file_info.model_dump()}
 
 
-@context_router.delete("/{filename}", status_code=status.HTTP_204_NO_CONTENT)
+@context_router.delete("/{content_hash}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_knowledge_file(
-    filename: str,
+    content_hash: str,
     scope: ContextScope = Query(default=ContextScope.GLOBAL),
     session_id: Optional[str] = Query(default=None),
     category_id: Optional[str] = Query(default=None),
@@ -196,14 +212,15 @@ async def delete_knowledge_file(
         get_knowledge_file_service),
 ):
     """
-    DELETE /api/context/{filename}
+    DELETE /api/context/{content_hash}
 
-    Delete a knowledge file and remove it from the manifest.
+    Delete a knowledge item by SHA-256 content hash (manifest key).
     """
     _validate_scope_context(scope, session_id, category_id)
+    h = _parse_content_hash(content_hash)
 
     deleted = knowledge_file_service.delete_file(
-        filename=filename,
+        content_hash=h,
         scope=scope,
         session_id=session_id,
         category_id=category_id,

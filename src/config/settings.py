@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     KB_DIRECTORY: str = os.path.join(
         project_root, '.knowledge_sources')
     KB_POST_TTL: int = 3600 * 24 * 7  # 7 days
-    KB_MAX_UPLOAD_BYTES: int = 102400
+    KB_MAX_UPLOAD_BYTES: int = 1024 * 1024 * 10  # 10MB
 
     # Redis (manifests for scoped KB file uploads)
     REDIS_URL: str = "redis://localhost:6379/0"

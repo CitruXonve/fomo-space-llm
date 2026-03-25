@@ -11,9 +11,10 @@ from src.api.chat import router as chat_router, stream_router
 from src.api.context import context_router
 from src.service.session_service import SessionService
 from src.service.llm_service import ClaudeLLMService
-from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
+from src.service.knowledge_base import KnowledgeBaseServiceMultiFormat
 from src.service.knowledge_file_service import KnowledgeFileService, KnowledgeRegistry
 from src.config.settings import settings
+from src.type.enums import ContextScope
 from src.utility.in_memory_redis import InMemoryRedis
 
 # Apply compatibility patches before any Anthropic streaming (handles dict container/context_management)
@@ -25,15 +26,24 @@ apply_langchain_anthropic_patch()
 logger = logging.getLogger(__name__)
 
 
+class _NoopKbRegistry:
+    """Placeholder until KnowledgeFileService is wired to the real KnowledgeRegistry."""
+
+    def invalidate_global(self) -> None:
+        pass
+
+    def invalidate(self, key: str) -> None:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize app.state on startup (replaces deprecated on_event startup)."""
     logger.info("Starting up...")
-    kb_service = KnowledgeBaseServiceMarkdown()
-    app.state.llm_service = ClaudeLLMService(kb_service)
     app.state.session_service = SessionService()
     try:
-        redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        redis_client = redis.from_url(
+            settings.REDIS_URL, decode_responses=True)
         redis_client.ping()
     except (
         redis_exceptions.ConnectionError,
@@ -47,13 +57,29 @@ async def lifespan(app: FastAPI):
             e,
         )
         redis_client = InMemoryRedis()
-    registry = KnowledgeRegistry(kb_service)
-    app.state.knowledge_file_service = KnowledgeFileService(
+
+    noop_registry = _NoopKbRegistry()
+    knowledge_file_service = KnowledgeFileService(
         settings.KB_DIRECTORY,
-        registry,
+        noop_registry,
         redis_client,
     )
-    app.state.knowledge_file_service.bootstrap_global()
+    knowledge_file_service.bootstrap_global()
+    global_sources = knowledge_file_service.iter_kb_sources(
+        ContextScope.GLOBAL, None, None
+    )
+    logger.warning(
+        f"Global sources after bootstrap: \n{"\n".join([f"- {source[0]} from {source[1]}" for source in global_sources])}")
+    kb_service = KnowledgeBaseServiceMultiFormat(
+        kb_directory=settings.KB_DIRECTORY,
+        cache_prefix="",
+        file_sources=global_sources,
+    )
+    registry = KnowledgeRegistry(kb_service)
+    registry.attach_file_service(knowledge_file_service)
+    knowledge_file_service.rebind_registry(registry)
+    app.state.knowledge_file_service = knowledge_file_service
+    app.state.llm_service = ClaudeLLMService(kb_service)
     logger.info("Resources initialized successfully")
     yield
 
