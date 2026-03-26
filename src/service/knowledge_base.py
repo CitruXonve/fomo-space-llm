@@ -1,12 +1,7 @@
 """
-Knowledge Base Service
-Purpose: Load, index, and search through FAQ content using semantic search.
-Key Features:
-- Simple text file loader (<500KB as per requirement)
-- Chunk text into semantic sections
-- Use sentence-transformers for embeddings (local, no API cost)
-- Cosine similarity search for retrieval
-- Embedding cache for faster startup when KB unchanged
+Knowledge base: load sources, chunk text, embed locally (sentence-transformers),
+and retrieve by cosine similarity. See ``KnowledgeBaseServiceMultiFormat`` for the
+lifecycle and which public entrypoints trigger a sync with disk and cache.
 """
 
 import re
@@ -22,12 +17,13 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from src.config.settings import settings
+from src.service.file_parser import ParserFactory
 
 logger = logging.getLogger(__name__)
 
 
-class MarkdownChunk:
-    """Represents a chunk of knowledge base content with metadata"""
+class Chunk:
+    """One searchable slice of a source file: text, provenance, optional embedding vector."""
 
     def __init__(
         self,
@@ -52,6 +48,8 @@ class MarkdownChunk:
 
 
 class KnowledgeBaseService(ABC):
+    """Contract for KB load, embed, stats, and search. See ``KnowledgeBaseServiceMultiFormat``."""
+
     @abstractmethod
     def __init__(self):
         pass
@@ -78,16 +76,36 @@ class KnowledgeBaseService(ABC):
         pass
 
 
-class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
+class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
     """
-    Handles markdown knowledge base loading, chunking, and semantic search.
+    Multi-format KB: ``.md``, ``.pdf``, and ``.txt`` sources parsed through
+    ``ParserFactory``. Supports both directory mode (``iterdir``) and manifest
+    mode (explicit ``file_sources`` list). Chunking respects section boundaries
+    and size limits; embeddings are batched through the configured SentenceTransformer.
 
-    Strategy:
-    1. Load all .md files from knowledge_base/ directory
-    2. Parse markdown structure (headers, sections)
-    3. Chunk by sections while preserving context
-    4. Generate embeddings using sentence-transformers
-    5. Perform semantic search using cosine similarity
+    Lifecycle (what happens over time)
+    ----------------------------------
+    1. ``__init__`` loads the embedding model, then calls ``_load_from_cache`` for the
+       current KB hash. On success, ``chunks`` and ``embeddings`` are restored from disk
+       cache and the instance is ready to search.
+    2. On cache miss or first use, callers rely on ``refresh_embeddings`` (directly or
+       via ``get_all_sources``, ``get_stats``, or ``search``) to align memory with sources.
+
+    State machine (conceptual)
+    --------------------------
+    * **uninitialized** — right after ``__init__`` if cache miss: ``chunks`` may be empty,
+      ``embeddings`` None until a successful refresh.
+    * **ready** — ``chunks`` and ``embeddings`` are populated and row-aligned; search and
+      stats are meaningful.
+    * **refreshing** — during ``refresh_embeddings`` when cache is invalid: chunks are
+      cleared, files are re-read, embeddings recomputed, cache rewritten.
+
+    ``refresh_embeddings`` first tries ``_load_from_cache`` for the computed hash; if that
+    succeeds it returns immediately without re-parsing source files. Otherwise it replaces
+    ``chunks``, reloads from disk, embeds, and saves cache.
+
+    ``_load_knowledge_base`` only appends to ``chunks``; ``refresh_embeddings`` clears
+    ``chunks`` before calling it so reloads are never duplicated.
     """
     embeddings: Optional[np.ndarray]
 
@@ -121,7 +139,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         logger.info("Embedding model loaded successfully")
 
         # Initialize storage
-        self.chunks: list[MarkdownChunk] = []
+        self.chunks: list[Chunk] = []
         self.embeddings = None
 
         # Compute current KB hash
@@ -133,7 +151,19 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
             logger.info(f"Loaded {len(self.chunks)} chunks from cache")
 
     def refresh_embeddings(self, current_hash: Optional[str] = None) -> str:
-        """Refresh embeddings for the knowledge base"""
+        """
+        Bring ``chunks`` and ``embeddings`` in sync with the KB on disk and embedding settings.
+
+        **When to use:** After adding, editing, or removing source files; when you need
+        guaranteed-fresh vectors without constructing a new service; or implicitly—this
+        is invoked by ``search``, ``get_stats``, and ``get_all_sources``.
+
+        **How it works:** Computes (or accepts) a content hash. If on-disk cache matches,
+        loads cache and returns. Otherwise clears ``chunks``, re-reads files, runs
+        ``_create_embeddings``, writes cache files, and returns the hash.
+
+        **Returns:** The KB hash string used for cache validation.
+        """
         hash = current_hash or self._compute_kb_hash()
         if self._load_from_cache(hash):
             return hash
@@ -147,18 +177,41 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         return hash
 
     def get_all_sources(self) -> list[str]:
-        """Get list of all source files in KB"""
+        """
+        Distinct logical / file names that appear in ``chunk.source_file``.
+
+        **When to use:** UI lists, metrics, or debugging which files contributed chunks.
+
+        **Behavior:** Calls ``refresh_embeddings`` first, so this can be expensive on a
+        cache miss (full re-embed). Result order is not guaranteed (built from a ``set``).
+        """
         self.refresh_embeddings()
         return list(set(chunk.source_file for chunk in self.chunks))
 
-    def get_chunk_by_index(self, index: int) -> Optional[MarkdownChunk]:
-        """Retrieve a specific chunk by index"""
+    def get_chunk_by_index(self, index: int) -> Optional[Chunk]:
+        """
+        Random access to ``self.chunks[index]`` if in range.
+
+        **When to use:** Inspecting a single chunk after you know its index (e.g. from
+        search ordering or tests).
+
+        **Caveat:** Does **not** call ``refresh_embeddings``; data may be stale relative to
+        disk until another method refreshes the service.
+        """
         if 0 <= index < len(self.chunks):
             return self.chunks[index]
         return None
 
     def get_stats(self) -> dict:
-        """Get knowledge base statistics"""
+        """
+        Snapshot of size and configuration: chunk count, source count, embedding width,
+        source list, and model object.
+
+        **When to use:** Health checks, admin dashboards, or tests asserting the KB loaded.
+
+        **Behavior:** Calls ``refresh_embeddings`` then ``get_all_sources`` (which refreshes
+        again internally). Prefer a single ``refresh_embeddings`` if you are batching work.
+        """
         self.refresh_embeddings()
         return {
             "total_chunks": len(self.chunks),
@@ -169,14 +222,11 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         }
 
     def _compute_kb_hash(self) -> str:
-        """
-        Compute a hash of the KB directory state.
-        Uses file names, sizes, and modification times to detect changes.
-        """
-        hash_data: list[str] = []
+        """Compute a hash of the KB state, including all supported file types."""
+        supported_suffixes = {".md", ".pdf", ".txt"}
 
         if self._file_sources is not None:
-            hash_data.append("mode:manifest")
+            hash_data = ["mode:manifest_mf"]
             for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
                 if path.is_file():
                     stat = path.stat()
@@ -185,24 +235,25 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
                     )
                 else:
                     hash_data.append(f"{logical}:missing")
-        else:
-            if not self.kb_directory.exists():
-                return ""
+            hash_data.append(f"chunk_size:{self.chunk_size}")
+            hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
+            hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
+            return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
 
-            hash_data.append("mode:glob")
-            md_files = sorted(self.kb_directory.glob("*.md"))
-            for md_file in md_files:
-                stat = md_file.stat()
-                hash_data.append(
-                    f"{md_file.name}:{stat.st_size}:{stat.st_mtime}")
+        if not self.kb_directory.exists():
+            return ""
 
-        # Also include chunk settings in hash (if settings change, re-embed)
+        hash_data = ["mode:iterdir_mf"]
+        for f in sorted(self.kb_directory.iterdir()):
+            if f.is_file() and f.suffix.lower() in supported_suffixes:
+                stat = f.stat()
+                hash_data.append(f"{f.name}:{stat.st_size}:{stat.st_mtime}")
+
         hash_data.append(f"chunk_size:{self.chunk_size}")
         hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
         hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
 
-        hash_string = "|".join(hash_data)
-        return hashlib.sha256(hash_string.encode()).hexdigest()
+        return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
 
     def _load_from_cache(self, current_hash: str) -> bool:
         """
@@ -234,7 +285,7 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
 
             self.chunks = []
             for i, chunk_dict in enumerate(chunks_data):
-                chunk = MarkdownChunk(
+                chunk = Chunk(
                     content=chunk_dict["content"],
                     source_file=chunk_dict["source_file"],
                     heading=chunk_dict["heading"],
@@ -271,121 +322,88 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
             logger.warning(f"Failed to save cache: {e}")
 
     def _load_knowledge_base(self) -> None:
-        """Load all markdown files from the knowledge base directory"""
+        factory = ParserFactory()
+        supported_suffixes = {".md", ".pdf", ".txt"}
+
         if self._file_sources is not None:
             if not self._file_sources:
-                logger.warning("No manifest-driven KB sources to load")
+                logger.warning("No manifest-driven KB sources (multi-format)")
                 return
-            for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
-                if not path.is_file():
+            for logical, file_path in sorted(self._file_sources, key=lambda x: x[0]):
+                if not file_path.is_file():
                     logger.warning(
                         "Skipping missing KB file for logical name '%s': %s",
                         logical,
-                        path,
+                        file_path,
                     )
                     continue
-                if path.suffix.lower() != ".md":
+                if file_path.suffix.lower() not in supported_suffixes:
                     logger.warning(
-                        "Skipping non-markdown source '%s' for logical name '%s'",
-                        path,
+                        "Skipping unsupported suffix for logical name '%s': %s",
                         logical,
+                        file_path,
                     )
                     continue
-                self._process_markdown_file(path, source_name=logical)
+                try:
+                    sections = factory.parse_file(file_path)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse %s (logical '%s'): %s",
+                        file_path,
+                        logical,
+                        e,
+                    )
+                    continue
+
+                for section_index, (heading, section_content) in enumerate(sections):
+                    section_chunks = self._chunk_section(section_content)
+                    for chunk_index, chunk_text in enumerate(section_chunks):
+                        chunk_with_context = self._add_context(
+                            heading, chunk_text)
+                        chunk = Chunk(
+                            content=chunk_with_context,
+                            source_file=logical,
+                            heading=heading,
+                            chunk_index=section_index *
+                            len(section_chunks) + chunk_index,
+                        )
+                        self.chunks.append(chunk)
             return
 
         if not self.kb_directory.exists():
             raise FileNotFoundError(
                 f"Knowledge base directory not found: {self.kb_directory}")
 
-        md_files = list(self.kb_directory.glob("*.md"))
+        all_files = [
+            f for f in sorted(self.kb_directory.iterdir())
+            if f.is_file() and f.suffix.lower() in supported_suffixes
+        ]
 
-        if not md_files:
-            logger.warning(f"No markdown files found in {self.kb_directory}")
-            return
-        #     raise ValueError(f"No markdown files found in {self.kb_directory}")
+        if not all_files:
+            raise ValueError(
+                f"No supported files found in {self.kb_directory}")
 
-        logger.info(f"Found {len(md_files)} markdown files")
+        logger.info(f"Found {len(all_files)} file(s) in {self.kb_directory}")
 
-        for md_file in md_files:
-            self._process_markdown_file(md_file)
+        for file_path in all_files:
+            try:
+                sections = factory.parse_file(file_path)
+            except Exception as e:
+                logger.warning(f"Failed to parse {file_path.name}: {e}")
+                continue
 
-    def _process_markdown_file(
-        self, file_path: Path, source_name: str | None = None
-    ) -> None:
-        """
-        Process a single markdown file into chunks.
-
-        Chunking strategy:
-        1. Parse markdown headers to identify sections
-        2. Chunk by section boundaries (respects semantic structure)
-        3. If section too large, split by paragraphs with overlap
-        4. Preserve header context in each chunk
-        """
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # Parse markdown into sections
-        sections = self._parse_markdown_sections(content)
-
-        # Process each section
-        for section_index, (heading, section_content) in enumerate(sections):
-            # Split large sections into smaller chunks
-            section_chunks = self._chunk_section(section_content)
-
-            for chunk_index, chunk_text in enumerate(section_chunks):
-                # Add header context to chunk for better retrieval
-                chunk_with_context = self._add_context(heading, chunk_text)
-
-                chunk = MarkdownChunk(
-                    content=chunk_with_context,
-                    source_file=source_name or file_path.name,
-                    heading=heading,
-                    chunk_index=section_index *
-                    len(section_chunks) + chunk_index
-                )
-                self.chunks.append(chunk)
-
-    def _parse_markdown_sections(self, content: str) -> list[tuple[str, str]]:
-        """
-        Parse markdown into sections based on headers.
-
-        Returns: list of (heading, content) tuples
-        """
-        # Split by headers (# ## ### etc.)
-        header_pattern = r'^(#{1,6})\s+(.+)$'
-
-        sections = []
-        current_heading = "Introduction"
-        current_content = []
-
-        lines = content.split('\n')
-
-        for line in lines:
-            match = re.match(header_pattern, line, re.MULTILINE)
-
-            if match:
-                # Save previous section
-                if current_content:
-                    sections.append((
-                        current_heading,
-                        '\n'.join(current_content).strip()
-                    ))
-
-                # Start new section
-                current_heading = match.group(2).strip()
-                current_content = []
-            else:
-                current_content.append(line)
-
-        # Add final section
-        if current_content:
-            sections.append((
-                current_heading,
-                '\n'.join(current_content).strip()
-            ))
-
-        return sections
+            for section_index, (heading, section_content) in enumerate(sections):
+                section_chunks = self._chunk_section(section_content)
+                for chunk_index, chunk_text in enumerate(section_chunks):
+                    chunk_with_context = self._add_context(heading, chunk_text)
+                    chunk = Chunk(
+                        content=chunk_with_context,
+                        source_file=file_path.name,
+                        heading=heading,
+                        chunk_index=section_index *
+                        len(section_chunks) + chunk_index,
+                    )
+                    self.chunks.append(chunk)
 
     def _chunk_section(self, content: str) -> list[str]:
         """
@@ -510,15 +528,18 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
         similarity_threshold: float = settings.DEFAULT_SIMILARITY_THRESHOLD
     ) -> list[dict]:
         """
-        Semantic search for relevant chunks.
+        Encode ``query`` and return up to ``top_k`` chunks whose cosine similarity meets
+        ``similarity_threshold``, each as ``chunk.to_dict()`` plus ``similarity_score``.
+
+        **When to use:** RAG retrieval or any semantic match over indexed text.
+
+        **Behavior:** Calls ``refresh_embeddings`` first so results match current files and
+        cache. Returns ``[]`` if the KB has no chunks or embeddings after refresh.
 
         Args:
-            query: User's question
-            top_k: Number of top results to return
-            similarity_threshold: Minimum similarity score (0-1)
-
-        Returns:
-            List of chunk dictionaries with similarity scores
+            query: Natural-language question or keywords.
+            top_k: Maximum number of candidates considered before threshold filtering.
+            similarity_threshold: Minimum similarity in [0, 1]; lower values yield more hits.
         """
         self.refresh_embeddings()
         if not self.chunks or self.embeddings is None:
@@ -552,135 +573,6 @@ class KnowledgeBaseServiceMarkdown(KnowledgeBaseService):
 
         return results
 
-
-class KnowledgeBaseServiceMultiFormat(KnowledgeBaseServiceMarkdown):
-    """
-    KB service for scoped (category / session) directories.
-
-    Overrides _load_knowledge_base() to load .md, .pdf, and .txt files via
-    ParserFactory, so that uploaded files of any supported format are indexed.
-    Inherits all chunking, embedding, caching, and search logic from the parent.
-    """
-
-    def _load_knowledge_base(self) -> None:
-        from src.service.file_parser import ParserFactory
-        factory = ParserFactory()
-        supported_suffixes = {".md", ".pdf", ".txt"}
-
-        if self._file_sources is not None:
-            if not self._file_sources:
-                logger.warning("No manifest-driven KB sources (multi-format)")
-                return
-            for logical, file_path in sorted(self._file_sources, key=lambda x: x[0]):
-                if not file_path.is_file():
-                    logger.warning(
-                        "Skipping missing KB file for logical name '%s': %s",
-                        logical,
-                        file_path,
-                    )
-                    continue
-                if file_path.suffix.lower() not in supported_suffixes:
-                    logger.warning(
-                        "Skipping unsupported suffix for logical name '%s': %s",
-                        logical,
-                        file_path,
-                    )
-                    continue
-                try:
-                    sections = factory.parse_file(file_path)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to parse %s (logical '%s'): %s",
-                        file_path,
-                        logical,
-                        e,
-                    )
-                    continue
-
-                for section_index, (heading, section_content) in enumerate(sections):
-                    section_chunks = self._chunk_section(section_content)
-                    for chunk_index, chunk_text in enumerate(section_chunks):
-                        chunk_with_context = self._add_context(
-                            heading, chunk_text)
-                        chunk = MarkdownChunk(
-                            content=chunk_with_context,
-                            source_file=logical,
-                            heading=heading,
-                            chunk_index=section_index *
-                            len(section_chunks) + chunk_index,
-                        )
-                        self.chunks.append(chunk)
-            return
-
-        if not self.kb_directory.exists():
-            raise FileNotFoundError(
-                f"Knowledge base directory not found: {self.kb_directory}")
-
-        all_files = [
-            f for f in sorted(self.kb_directory.iterdir())
-            if f.is_file() and f.suffix.lower() in supported_suffixes
-        ]
-
-        if not all_files:
-            raise ValueError(
-                f"No supported files found in {self.kb_directory}")
-
-        logger.info(f"Found {len(all_files)} file(s) in {self.kb_directory}")
-
-        for file_path in all_files:
-            try:
-                sections = factory.parse_file(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to parse {file_path.name}: {e}")
-                continue
-
-            for section_index, (heading, section_content) in enumerate(sections):
-                section_chunks = self._chunk_section(section_content)
-                for chunk_index, chunk_text in enumerate(section_chunks):
-                    chunk_with_context = self._add_context(heading, chunk_text)
-                    chunk = MarkdownChunk(
-                        content=chunk_with_context,
-                        source_file=file_path.name,
-                        heading=heading,
-                        chunk_index=section_index *
-                        len(section_chunks) + chunk_index,
-                    )
-                    self.chunks.append(chunk)
-
-    def _compute_kb_hash(self) -> str:
-        """Override to include all supported file types in the hash."""
-        supported_suffixes = {".md", ".pdf", ".txt"}
-
-        if self._file_sources is not None:
-            hash_data = ["mode:manifest_mf"]
-            for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
-                if path.is_file():
-                    stat = path.stat()
-                    hash_data.append(
-                        f"{logical}:{path.resolve()}:{stat.st_size}:{stat.st_mtime}"
-                    )
-                else:
-                    hash_data.append(f"{logical}:missing")
-            hash_data.append(f"chunk_size:{self.chunk_size}")
-            hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
-            hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
-            return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
-
-        if not self.kb_directory.exists():
-            return ""
-
-        hash_data = ["mode:iterdir_mf"]
-        for f in sorted(self.kb_directory.iterdir()):
-            if f.is_file() and f.suffix.lower() in supported_suffixes:
-                stat = f.stat()
-                hash_data.append(f"{f.name}:{stat.st_size}:{stat.st_mtime}")
-
-        hash_data.append(f"chunk_size:{self.chunk_size}")
-        hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
-        hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
-
-        return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
-
-
+# on-demand
 if __name__ == "__main__":
-    KnowledgeBaseServiceMarkdown()
+    KnowledgeBaseServiceMultiFormat().refresh_embeddings()

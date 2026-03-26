@@ -1,7 +1,7 @@
 import json
 import time
 from src.config.settings import settings
-from src.service.knowledge_base import KnowledgeBaseServiceMarkdown, KnowledgeBaseServiceMultiFormat
+from src.service.knowledge_base import KnowledgeBaseServiceMultiFormat
 import unittest
 
 

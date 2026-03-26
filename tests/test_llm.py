@@ -6,7 +6,7 @@ import unittest
 from langchain.messages import AIMessage
 from langchain_core.messages import HumanMessage
 from src.service.llm_service import ClaudeLLMService, evaluate_confidence
-from src.service.knowledge_base import KnowledgeBaseServiceMarkdown
+from src.service.knowledge_base import KnowledgeBaseServiceMultiFormat
 from src.utility.content_helper import normalize_content
 from src.utility.spinner import Spinner
 
@@ -18,7 +18,7 @@ class TestLLM(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         """Run once before all tests in this class."""
         start_time = time.time()
-        cls.llm_service = ClaudeLLMService(KnowledgeBaseServiceMarkdown())
+        cls.llm_service = ClaudeLLMService(KnowledgeBaseServiceMultiFormat())
         end_time = time.time()
         print(
             f"Time taken to initialize LLM service: {(end_time - start_time):.2f} seconds")
