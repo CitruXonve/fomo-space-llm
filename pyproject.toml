@@ -31,6 +31,7 @@ pymupdf4llm = "^0.2.9"
 pymupdf-layout = "^1.26.6"
 redis = "^7.3.0"
 uvicorn = "^0.42.0"
+playwright = "^1.49.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
