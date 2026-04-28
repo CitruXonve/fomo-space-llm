@@ -245,7 +245,8 @@ class LinkedInWebAgent:
     async def _is_authenticated(self) -> bool:
         current_url = await self.browser.get_current_url()
         blocked_markers = ("/login", "/uas/login", "/checkpoint", "/authwall")
-        matched_marker = next((m for m in blocked_markers if m in current_url), None)
+        matched_marker = next(
+            (m for m in blocked_markers if m in current_url), None)
         if matched_marker is not None:
             return False
         try:
@@ -290,7 +291,8 @@ class LinkedInWebAgent:
         has_signed_out_hint = has_sign_in_form or has_join_link
         on_feed = "/feed/" in current_url
 
-        is_authenticated = has_logged_in_hint or (on_feed and not has_signed_out_hint)
+        is_authenticated = has_logged_in_hint or (
+            on_feed and not has_signed_out_hint)
         return is_authenticated
 
     def _build_agent(self):

@@ -33,6 +33,7 @@ import base64
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -59,6 +60,36 @@ def _strip_markdown_js_fence(code: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _strip_llm_typescript_noise(code: str) -> str:
+    """Strip common TypeScript-only syntax LLMs emit into browser ``evaluate`` snippets.
+
+    ``new Function(body)`` parses as JavaScript only; annotations like
+    ``const x: string =`` cause ``SyntaxError: Unexpected token ':'``.
+    """
+    if not code.strip():
+        return code
+    out = code
+    out = re.sub(
+        r"\b(const|let|var)\s+(\w+)\s*:\s*(?:string|number|boolean|bigint|symbol|any|undefined|unknown|never|void|object)\s*(?==)",
+        r"\1 \2 ",
+        out,
+    )
+    prev = None
+    while prev != out:
+        prev = out
+        out = re.sub(
+            r"([\(\,]\s*)(\w+)\s*:\s*(?:string|number|boolean|bigint|symbol|any|undefined|unknown|HTMLElement|HTMLDocument|Element|Node|Document|Window)\s*(?=[,\)])",
+            r"\1\2",
+            out,
+        )
+    return out
+
+
+def _normalize_llm_javascript(code: str) -> str:
+    """Fence strip then TypeScript noise removal."""
+    return _strip_llm_typescript_noise(_strip_markdown_js_fence(code))
+
+
 def _wrap_for_page_evaluate(code: str) -> str:
     """Return a Playwright-safe evaluate expression.
 
@@ -66,7 +97,7 @@ def _wrap_for_page_evaluate(code: str) -> str:
     ``return``, bare expressions, or statement blocks; ``new Function`` runs the body
     in a proper function scope.
     """
-    c = _strip_markdown_js_fence(code)
+    c = _normalize_llm_javascript(code)
     if not c:
         return "() => undefined"
 
