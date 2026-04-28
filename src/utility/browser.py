@@ -15,12 +15,9 @@ Each invocation:
 """
 
 import asyncio
-import logging
 
 from src.utility.linkedin_web_agent import LinkedInWebAgent, _spin_until
 from src.utility.spinner import Spinner
-
-logger = logging.getLogger(__name__)
 
 
 async def main() -> None:

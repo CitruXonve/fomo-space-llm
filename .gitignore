@@ -239,3 +239,9 @@ __marimo__/
 
 # Embedding cache
 .embedding_cache/
+
+# Output
+.output/
+
+# Agent browser profile
+.browser_profile*/

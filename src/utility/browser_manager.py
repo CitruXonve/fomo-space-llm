@@ -30,6 +30,7 @@ Persistent usage (reuses a saved Chrome profile):
 
 import asyncio
 import base64
+import json
 import logging
 import os
 from pathlib import Path
@@ -44,6 +45,63 @@ from playwright.async_api import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_markdown_js_fence(code: str) -> str:
+    c = code.strip()
+    if not c.startswith("```"):
+        return c
+    lines = c.split("\n")
+    if lines:
+        lines = lines[1:]
+    while lines and lines[-1].strip() == "```":
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _wrap_for_page_evaluate(code: str) -> str:
+    """Return a Playwright-safe evaluate expression.
+
+    ``page.evaluate(string)`` rejects top-level ``return``. LLM snippets may use
+    ``return``, bare expressions, or statement blocks; ``new Function`` runs the body
+    in a proper function scope.
+    """
+    c = _strip_markdown_js_fence(code)
+    if not c:
+        return "() => undefined"
+
+    lines = [ln for ln in c.splitlines() if ln.strip()]
+    first = lines[0].strip() if lines else ""
+    multi = len(lines) > 1
+
+    statement_starts = (
+        "return",
+        "const ",
+        "let ",
+        "var ",
+        "if ",
+        "for ",
+        "while ",
+        "try ",
+        "throw ",
+        "switch ",
+        "do ",
+        "class ",
+        "import ",
+        "export ",
+        "await ",
+        "async ",
+        "function ",
+    )
+    use_raw_body = multi or first.startswith(statement_starts)
+    fn_body = c if use_raw_body else f"return ({c});"
+
+    body_literal = json.dumps(fn_body)
+    return (
+        "(() => { const __f = new Function("
+        + body_literal
+        + "); return __f.call(globalThis); })()"
+    )
 
 
 _DEFAULT_USER_AGENT = (
@@ -216,9 +274,10 @@ class BrowserManager:
     async def execute_javascript(self, code: str) -> Any:
         """Run ``code`` via ``page.evaluate`` and return the JSON-serializable result."""
         page = self._ensure_started()
+        wrapped = _wrap_for_page_evaluate(code)
         snippet = code if len(code) <= 100 else f"{code[:100]}..."
         logger.debug("Executing JavaScript: %s", snippet)
-        return await page.evaluate(code)
+        return await page.evaluate(wrapped)
 
     async def scroll(self, pixels: int) -> None:
         """Scroll the page by ``pixels`` (positive = down, negative = up)."""
@@ -255,22 +314,70 @@ class BrowserManager:
             return text
         return str(text) if text is not None else ""
 
-    async def stream_screenshots(
+    def _truncate_html_snapshot(self, html: str, max_chars: int) -> str:
+        """Append a truncation notice when ``html`` exceeds ``max_chars``."""
+        if max_chars <= 0 or len(html) <= max_chars:
+            return html
+        remainder = len(html) - max_chars
+        return html[:max_chars] + f"\n... [truncated, {remainder} more chars]"
+
+    async def _get_html_snapshot(self, selector: str | None = None) -> str:
+        """Return HTML suitable for ``BeautifulSoup(html, 'html.parser')``.
+
+        If ``selector`` is ``None``, returns the full document from
+        :meth:`Page.content`. Otherwise returns ``outerHTML`` of the first
+        element matching the CSS selector, or ``""`` if none match.
+        """
+        page = self._ensure_started()
+        try:
+            if selector is None:
+                return await page.content()
+            root = page.locator(selector)
+            if await root.count() == 0:
+                return ""
+            return await root.first.evaluate("el => el.outerHTML")
+        except Exception as exc:
+            logger.error("HTML snapshot failed: %s", exc)
+            return ""
+
+    async def get_page_html(self, selector: str | None = None) -> str:
+        """Return HTML suitable for ``BeautifulSoup(html, 'html.parser')``.
+
+        Delegates to :meth:`_get_html_snapshot`. Use ``selector`` to capture a
+        subtree (``outerHTML`` of the first match) instead of the full document.
+        """
+        return await self._get_html_snapshot(selector)
+
+    async def stream_html_snapshots(
         self,
         interval_seconds: float = 2.0,
+        *,
+        selector: str | None = None,
+        max_chars: int = 80_000,
     ) -> AsyncIterator[str]:
-        """Yield base64 PNG screenshots every ``interval_seconds`` until cancelled."""
+        """Yield HTML snapshots on an interval until cancelled or stream ends.
+
+        Each chunk is a string you can pass to BeautifulSoup for inspection.
+        When ``selector`` is ``None``, the full document is captured; otherwise
+        only the ``outerHTML`` of the first matching element is captured.
+
+        ``max_chars`` caps each yield to limit token usage when snapshots are
+        large; truncated payloads end with a ``... [truncated, N more chars]`` line.
+
+        If a snapshot is empty (e.g. missing ``selector`` match), logs a
+        warning and stops yielding.
+        """
         self._ensure_started()
         try:
             while self.page is not None:
-                shot = await self.get_screenshot()
-                if not shot:
-                    logger.warning("Empty screenshot; stopping stream")
+                raw = await self._get_html_snapshot(selector)
+                if not raw:
+                    logger.warning("Empty HTML snapshot; stopping stream")
                     return
-                yield shot
+                yield self._truncate_html_snapshot(raw, max_chars)
                 await asyncio.sleep(interval_seconds)
         except asyncio.CancelledError:
-            logger.info("Screenshot stream cancelled")
+            logger.info("HTML snapshot stream cancelled")
             raise
 
     def _ensure_started(self) -> Page:

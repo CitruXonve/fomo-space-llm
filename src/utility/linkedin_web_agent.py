@@ -26,7 +26,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
@@ -36,6 +36,7 @@ from langchain_core.tools import tool
 
 from src.config.settings import settings
 from src.utility.browser_manager import BrowserManager
+from src.utility.linkedin_feed_parser import activity_id_from_url, parse_feed_posts
 from src.utility.spinner import Spinner
 
 logger = logging.getLogger(__name__)
@@ -54,9 +55,11 @@ CONSTRAINTS:
 - Only consider posts published within the last {recency_hours} hours.
 
 GUARDRAILS:
+- Never paste raw HTML into your responses; bulk feed ingestion is done server-side via ``collect_raw_feed_posts`` (BeautifulSoup), which returns compact JSON only.
 - Never paste base64 screenshot payloads back into your responses; treat them as opaque evidence only.
-- Never invent URLs -- only record URLs you have observed in the page DOM or visible text.
-- Use the available tools to navigate, scroll, and extract content; do not assume content you have not loaded.
+- Never invent URLs -- only record URLs you have observed from tool output (e.g. ``collect_raw_feed_posts``) or visible text from targeted extraction.
+- Prefer ``collect_raw_feed_posts`` over ``extract_visible_text`` for loading many feed posts (lower tokens). Use the available tools to navigate or scroll only as needed outside that flow.
+- In ``execute_javascript``, ``document.querySelector`` / ``querySelectorAll`` only accept **browser CSS** (as in DevTools). Do not use Playwright-only selectors such as ``:has-text()``, ``:nth-match()``, or ``text=`` — they will throw. Prefer ``aria-label``, role-based queries, XPath via ``document.evaluate``, or walking the DOM.
 
 OUTPUT REQUIREMENTS:
 - Save the final result as JSON via the `save_output_to_file` tool.
@@ -69,7 +72,7 @@ DEFAULT_LINKEDIN_TASK_TEMPLATE = """
 Execute the following steps IN ORDER using the available tools:
 
 1. Navigate to the LinkedIn feed page (https://www.linkedin.com/feed/), then click "sort by" and select "recent".
-2. Scrape the feed to collect raw posts -- not more than {max_posts} posts -- published within the last {recency_hours} hours, by scrolling down the page.
+2. Call ``collect_raw_feed_posts`` to gather up to {max_posts} raw posts (parses HTML in Python; scroll as needed via that tool — do not paste HTML). Keep posts published within the last {recency_hours} hours based on ``relative_time`` / snippet text when present.
 3. For each raw post that looks like a hiring announcement, record:
    a. The company's LinkedIn URL.
    b. The job listing URL (if present, otherwise null).
@@ -226,8 +229,11 @@ class LinkedInWebAgent:
 
         loop = asyncio.get_event_loop()
         deadline = loop.time() + self.login_timeout_s
+        attempts = 0
         while loop.time() < deadline:
-            if await self._is_authenticated():
+            attempts += 1
+            is_authed = await self._is_authenticated()
+            if is_authed:
                 logger.info("LinkedIn sign-in completed by user")
                 return
             await asyncio.sleep(2.0)
@@ -238,19 +244,54 @@ class LinkedInWebAgent:
 
     async def _is_authenticated(self) -> bool:
         current_url = await self.browser.get_current_url()
-        if any(
-            marker in current_url
-            for marker in ("/login", "/uas/login", "/checkpoint", "/authwall")
-        ):
+        blocked_markers = ("/login", "/uas/login", "/checkpoint", "/authwall")
+        matched_marker = next((m for m in blocked_markers if m in current_url), None)
+        if matched_marker is not None:
             return False
         try:
-            present = await self.browser.execute_javascript(
-                "Boolean(document.querySelector('nav.global-nav, [data-test-global-nav]'))"
+            probe = await self.browser.execute_javascript(
+                """(() => {
+                    const hasGlobalNav = Boolean(
+                        document.querySelector('nav.global-nav, [data-test-global-nav], .global-nav')
+                    );
+                    const hasSearchInput = Boolean(
+                        document.querySelector('input[placeholder*="Search"], input[aria-label*="Search"]')
+                    );
+                    const hasNetworkLink = Boolean(
+                        document.querySelector('a[href*="/mynetwork/"], a[href*="/jobs/"], a[href*="/messaging/"]')
+                    );
+                    const hasSignInForm = Boolean(
+                        document.querySelector('form[action*="login"], input[name="session_key"], input[name="session_password"]')
+                    );
+                    const hasJoinLink = Boolean(
+                        document.querySelector('a[href*="signup"], a[data-tracking-control-name*="join"]')
+                    );
+                    return {
+                        hasGlobalNav,
+                        hasSearchInput,
+                        hasNetworkLink,
+                        hasSignInForm,
+                        hasJoinLink,
+                    };
+                })()"""
             )
         except Exception as exc:
             logger.debug("Auth DOM probe failed: %s", exc)
             return False
-        return bool(present)
+        if not isinstance(probe, dict):
+            probe = {}
+        has_global_nav = bool(probe.get("hasGlobalNav"))
+        has_search_input = bool(probe.get("hasSearchInput"))
+        has_network_link = bool(probe.get("hasNetworkLink"))
+        has_sign_in_form = bool(probe.get("hasSignInForm"))
+        has_join_link = bool(probe.get("hasJoinLink"))
+
+        has_logged_in_hint = has_global_nav or has_search_input or has_network_link
+        has_signed_out_hint = has_sign_in_form or has_join_link
+        on_feed = "/feed/" in current_url
+
+        is_authenticated = has_logged_in_hint or (on_feed and not has_signed_out_hint)
+        return is_authenticated
 
     def _build_agent(self):
         return create_agent(
@@ -278,6 +319,7 @@ class LinkedInWebAgent:
     def _build_tools(self) -> list:
         browser = self.browser
         export_dir = self._export_dir
+        agent_max_posts = self.max_posts
 
         @tool
         async def navigate(url: str) -> str:
@@ -299,13 +341,22 @@ class LinkedInWebAgent:
         async def extract_visible_text(max_chars: int = 8000) -> str:
             """Return ``document.body.innerText`` for the current page, truncated to ``max_chars``."""
             text = await browser.extract_visible_text()
+            returned_text = text
             if max_chars > 0 and len(text) > max_chars:
-                return text[:max_chars] + f"\n... [truncated, {len(text) - max_chars} more chars]"
-            return text
+                returned_text = (
+                    text[:max_chars]
+                    + f"\n... [truncated, {len(text) - max_chars} more chars]"
+                )
+            return returned_text
 
         @tool
         async def execute_javascript(code: str) -> str:
-            """Execute JavaScript in the page context and return the JSON-serialized result."""
+            """Run JS in the page (same as the browser console). Results are JSON-serialized.
+
+            ``querySelector`` / ``querySelectorAll`` only support standard CSS selectors understood
+            by Chromium — not Playwright locator syntax (e.g. ``:has-text('x')``). For text matching
+            use XPath (``document.evaluate``), ``TreeWalker``, or filter elements after a broad query.
+            """
             result = await browser.execute_javascript(code)
             try:
                 return json.dumps(result, default=str)
@@ -314,18 +365,72 @@ class LinkedInWebAgent:
 
         @tool
         async def take_screenshot() -> str:
-            """Capture a base64-encoded PNG screenshot of the current viewport.
+            """Verify a viewport PNG can be captured; image bytes are not returned (token limit).
 
-            Treat the returned base64 string as opaque evidence -- do not paste it
-            back into the response.
+            Raw base64 must not be placed in tool output — it spans hundreds of thousands of tokens.
+            Use ``extract_visible_text`` or DOM tools for page content.
             """
-            return await browser.get_screenshot()
+            b64 = await browser.get_screenshot()
+            if not b64:
+                return "screenshot failed (empty capture)"
+            b64_len = len(b64)
+            approx_bytes = (b64_len * 3) // 4
+            return (
+                f"Screenshot OK (PNG, {b64_len} base64 chars, ~{approx_bytes // 1024} KiB). "
+                "Image data omitted from model context; use extract_visible_text or execute_javascript for content."
+            )
 
         @tool
         async def scroll(pixels: int = 800) -> str:
             """Scroll the page vertically by ``pixels`` (positive = down)."""
             await browser.scroll(pixels)
             return f"scrolled {pixels}px"
+
+        @tool
+        async def collect_raw_feed_posts(
+            scroll_rounds: int = 3,
+            max_posts: int | None = None,
+            html_selector: str | None = None,
+        ) -> str:
+            """Collect LinkedIn feed posts by parsing the current page HTML server-side.
+
+            Raw HTML is never returned to the model — only a compact JSON list of dicts with
+            ``post_url``, ``author_profile_url``, ``text_snippet``, and ``relative_time``.
+            Performs ``scroll_rounds`` scroll-load cycles after the initial capture (capped).
+
+            Cap ``max_posts`` is enforced against the agent run limit."""
+            target = max_posts if max_posts is not None else agent_max_posts
+            target = max(1, min(int(target), agent_max_posts))
+            sr = max(0, min(int(scroll_rounds), 10))
+
+            merged: list[dict[str, str]] = []
+            seen: set[str] = set()
+
+            def _key(row: dict[str, str]) -> str:
+                uid = activity_id_from_url(row.get("post_url", "") or "")
+                return uid or (row.get("post_url") or "")[:512]
+
+            for i in range(sr + 1):
+                html = await browser.get_page_html(html_selector)
+                if not html:
+                    logger.warning("collect_raw_feed_posts: empty HTML")
+                    break
+                batch = parse_feed_posts(html)
+                for row in batch:
+                    k = _key(row)
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    merged.append(dict(row))
+                    if len(merged) >= target:
+                        break
+                if len(merged) >= target:
+                    break
+                if i < sr:
+                    await browser.scroll(800)
+                    await asyncio.sleep(0.75)
+
+            return json.dumps(merged[:target], ensure_ascii=False)
 
         @tool
         async def wait_for(
@@ -358,6 +463,7 @@ class LinkedInWebAgent:
             execute_javascript,
             take_screenshot,
             scroll,
+            collect_raw_feed_posts,
             wait_for,
             save_output_to_file,
         ]
