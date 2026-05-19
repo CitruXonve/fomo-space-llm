@@ -167,36 +167,89 @@ class PDFParser(FileParser):
 
         return filtered_dict
 
+    def _infer_section_heading(
+        markdown_heading: str,
+        body: str,
+        page_number: int | None,
+        md5_hash: str,
+        section_index: int,
+    ) -> str:
+        if markdown_heading and markdown_heading.lower() != "introduction":
+            return markdown_heading
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        if lines:
+            first = lines[0]
+            if len(first) < 100 and not first.endswith("."):
+                return first
+        if page_number is not None:
+            return f"Page {page_number}"
+        return f"{md5_hash}-{section_index}"
+
     def parse(self, file_path: Path, args: dict = {}) -> list[Section]:
-        """Parse PDF into sections"""
+        """Parse PDF into sections. Use prechunk=False for semantic KB path."""
         from hashlib import md5
+
         md5_hash = md5(file_path.read_bytes()).hexdigest()
+        prechunk = args.get("prechunk", False)
 
         import pymupdf.layout  # avoid falling back to legacy mode that ignores use_ocr=False
         import pymupdf4llm
-        md_text = pymupdf4llm.to_markdown(str(
-            file_path), headers=False, footers=False, page_chunks=True, write_images=False, show_progress=True, use_ocr=False)
 
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=args.get(
-                'chunk_size', settings.EMBEDDING_MODEL_CHUNK_SIZE),
-            chunk_overlap=args.get(
-                'chunk_overlap', settings.EMBEDDING_MODEL_CHUNK_OVERLAP),
-            separators=["\n\n", "\n", " ", ""]
+        md_text = pymupdf4llm.to_markdown(
+            str(file_path),
+            headers=False,
+            footers=False,
+            page_chunks=True,
+            write_images=False,
+            show_progress=True,
+            use_ocr=False,
         )
 
-        sections = []
-        for page in md_text:
-            parsed_sections = parse_markdown_to_sections(page["text"])
-            for parsed_section in parsed_sections:
-                text_chunks = text_splitter.split_text(parsed_section[1])
-                for text_chunk in text_chunks:
-                    if text_chunk.strip():
-                        sections.append(text_chunk)
+        result: list[Section] = []
+        section_index = 0
 
-        return [(f"{md5_hash}-{section_index}", section_content)
-                for section_index, section_content in enumerate(sections)]
+        for page_idx, page in enumerate(md_text, start=1):
+            page_number = page.get("metadata", {}).get("page") or page_idx
+            parsed_sections = parse_markdown_to_sections(page["text"])
+
+            # deprecated: use semantic chunking instead of legacy paragraph-and-sentence splitter
+            if prechunk:
+                from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=args.get(
+                        "chunk_size", settings.EMBEDDING_MODEL_CHUNK_SIZE
+                    ),
+                    chunk_overlap=args.get(
+                        "chunk_overlap", settings.EMBEDDING_MODEL_CHUNK_OVERLAP
+                    ),
+                    separators=["\n\n", "\n", " ", ""],
+                )
+                for _heading, section_body in parsed_sections:
+                    if not section_body.strip():
+                        continue
+                    for text_chunk in text_splitter.split_text(section_body):
+                        if text_chunk.strip():
+                            result.append(
+                                (f"{md5_hash}-{section_index}", text_chunk)
+                            )
+                            section_index += 1
+                continue
+
+            for heading, section_body in parsed_sections:
+                if not section_body.strip():
+                    continue
+                resolved_heading = self._infer_section_heading(
+                    heading,
+                    section_body,
+                    page_number,
+                    md5_hash,
+                    section_index,
+                )
+                result.append((resolved_heading, section_body.strip()))
+                section_index += 1
+
+        return result
 
 
 class TextParser(FileParser):
@@ -299,11 +352,14 @@ class ParserFactory:
         logger.info(f"Parsing {file_path} with {parser.__class__.__name__}")
         return parser.parse(file_path, args)
 
+
 if __name__ == "__main__":
     parser_factory = ParserFactory()
     for file in Path(settings.KB_DIRECTORY).rglob("*"):
         if file.is_file():
             parser, format = parser_factory.get_parser_and_format(file)
             if parser is not None:
-                print(f"Find {parser.__class__.__name__} compatible with {format.value} type for file: {file.relative_to(settings.KB_DIRECTORY)}")
-                logger.info(f"Find {parser.__class__.__name__} compatible with {format.value} type for file: {file.relative_to(settings.KB_DIRECTORY)}")
+                print(
+                    f"Find {parser.__class__.__name__} compatible with {format.value} type for file: {file.relative_to(settings.KB_DIRECTORY)}")
+                logger.info(
+                    f"Find {parser.__class__.__name__} compatible with {format.value} type for file: {file.relative_to(settings.KB_DIRECTORY)}")
