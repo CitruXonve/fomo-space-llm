@@ -1,6 +1,27 @@
-# "FomoSpace" RAG-powered Backend
+# "FomoSpace" RAG Backend
 
 A lightweight FastAPI backend service that digests upstream documents or files, and uses LLM and RAG for knowledge retrieval.
+
+## Recent Update
+
+#### A/B evaluation summary (2026-05-19)
+
+**Corpus:** 298 sources under `.knowledge_sources` ([devblog](devblog.citruxonve.net) markdown posts plus public resource - [ByteByteGo system-design](https://bytebytego.com/courses/system-design-interview/) eBook saved into PDFs). **Queries:** 5 golden retrieval questions from `tests/fixtures/retrieval_queries.jsonl`. **Metric:** Hit@k with substring match on top-ranked chunks (`k=3`).
+
+| Metric                             | Legacy          | Semantic          |
+| ---------------------------------- | --------------- | ----------------- |
+| Total chunks                       | 2,074           | 1,766             |
+| Mean / median / p95 length (chars) | 477 / 437 / 983 | 408 / 285 / 1,191 |
+| Chunks below min size (80 chars)   | 66              | 151               |
+| Hit@1                              | 80% (4/5)       | **100% (5/5)**    |
+| Hit@3                              | 80% (4/5)       | **100% (5/5)**    |
+| Mean MRR                           | 0.80            | **1.00**          |
+
+**Retrieval:** Semantic chunking matched all five golden queries. Legacy (paragraph-and-sentence splitter) missed _“What is the difference between vertical and horizontal scaling?”_ — the top chunk contained the right text but used an opaque PDF heading (`{md5}-15`), so the optional heading filter failed. Semantic retrieval surfaced the same content under a readable heading (_“Vertical scaling vs horizontal scaling”_) and ranked it first.
+
+**Chunk stats:** Semantic produced ~15% fewer chunks with a lower median size (more topic-focused slices) but more sub-80-character fragments and a higher p95 (occasional long chunks before fallback splitting).
+
+**Takeaway:** On this corpus, semantic chunking improved golden-set retrieval (especially PDF/system-design material) at the cost of more tiny chunks. Production remains on `legacy` until you set `CHUNKING_STRATEGY=semantic` and run `make clear-local-cache` after switching.
 
 ## Quick Start
 
@@ -185,9 +206,29 @@ The default source of knowledge is [`Dev Blog of CitruXonve`](https://github.com
 >>> fetcher.save_all_posts()
 ```
 
-Currently, the supported knowledge document format is `markdown`. PDF format support will be available soon.
+Supported knowledge formats: `markdown`, `pdf`, and `txt`. Additional documents can be placed in `.knowledge_sources`.
 
-Additional document of knowledge can be manually added into `.knowledge_sources`.
+### Chunking strategies
+
+Indexing supports two chunking modes (see `CHUNKING_STRATEGY` in `.env`):
+
+| Strategy             | Description                                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------- |
+| `semantic` (default) | Structure-first sections, then embedding-breakpoint splits per section (sentence similarity).           |
+| `legacy`             | PDF pre-split via `RecursiveCharacterTextSplitter`, then paragraph/sentence chunking in the KB service. |
+
+### Evaluation
+
+Compare both chunking strategies on the current corpus without starting the API:
+
+```bash
+make compare-chunking
+# optional: FILE=".knowledge_sources/your.pdf" QUERIES=tests/fixtures/retrieval_queries.jsonl K=3
+```
+
+Reports are written to `.export/compare_chunking_<timestamp>.json`.
+
+Run eval: `make compare-chunking`
 
 ### Run server
 
@@ -215,6 +256,7 @@ make debug-server
 
 ```bash
 make test-all
+make compare-chunking   # A/B chunking stats + Hit@k (see Chunking strategies above)
 ```
 
 ### Observatory via LangSmith

@@ -1,0 +1,5 @@
+{"query": "What is OLTP/ OLAP and their use cases?", "expected_substrings": ["OLTP", "OLAP"]}
+{"query": "How to prepare for a Java interview?", "expected_substrings": ["Java", "interview"]}
+{"query": "What is the difference between vertical and horizontal scaling?", "expected_substrings": ["vertical", "horizontal"], "optional_heading_contains": "scal"}
+{"query": "How does a load balancer work?", "expected_substrings": ["load", "balancer"]}
+{"query": "What is database sharding?", "expected_substrings": ["shard"]}

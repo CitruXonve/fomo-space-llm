@@ -4,6 +4,14 @@ test-file-parser:
 test-kb:
 	@python -m unittest tests/test_kb.py
 
+# A/B chunking: legacy vs semantic stats + Hit@k (no FastAPI server)
+# Optional: FILE=path/to/doc.pdf QUERIES=tests/fixtures/retrieval_queries.jsonl K=3
+compare-chunking:
+	@poetry run python scripts/compare_chunking.py \
+		$(if $(FILE),--sources "$(FILE)",) \
+		$(if $(QUERIES),--queries "$(QUERIES)",) \
+		$(if $(K),--k $(K),)
+
 test-llm:
 	@python -m unittest tests/test_llm.py
 
