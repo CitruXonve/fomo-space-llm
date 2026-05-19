@@ -4,7 +4,6 @@ and retrieve by cosine similarity. See ``KnowledgeBaseServiceMultiFormat`` for t
 lifecycle and which public entrypoints trigger a sync with disk and cache.
 """
 
-import re
 import json
 import hashlib
 import numpy as np
@@ -17,6 +16,12 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from src.config.settings import settings
+from src.service.chunking import (
+    ChunkingStrategy,
+    SemanticChunkSettings,
+    chunk_section,
+    chunking_strategy_from_settings,
+)
 from src.service.file_parser import ParserFactory
 
 logger = logging.getLogger(__name__)
@@ -114,6 +119,7 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
         kb_directory: str | None = None,
         cache_prefix: str = "",
         file_sources: Sequence[tuple[str, Path]] | None = None,
+        chunking_strategy: ChunkingStrategy | None = None,
     ):
         self.kb_directory = Path(kb_directory) if kb_directory else Path(
             settings.KB_DIRECTORY)
@@ -121,11 +127,14 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
         self._file_sources: Sequence[tuple[str, Path]] | None = file_sources
         self.chunk_size = settings.EMBEDDING_MODEL_CHUNK_SIZE
         self.chunk_overlap = settings.EMBEDDING_MODEL_CHUNK_OVERLAP
+        self.chunking_strategy = chunking_strategy or chunking_strategy_from_settings()
+        self.semantic_settings = SemanticChunkSettings.from_settings()
 
-        # Embedding cache paths — namespaced by cache_prefix to support multiple instances
+        # Embedding cache paths — namespaced by cache_prefix + strategy
         self.cache_dir = Path(settings.EMBEDDING_CACHE_DIR)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{cache_prefix}_" if cache_prefix else ""
+        strategy_prefix = f"{self.chunking_strategy.value}_"
+        prefix = f"{cache_prefix}_{strategy_prefix}" if cache_prefix else strategy_prefix
         self.embeddings_cache_file = self.cache_dir / f"{prefix}embeddings.npy"
         self.chunks_cache_file = self.cache_dir / f"{prefix}chunks.json"
         self.hash_cache_file = self.cache_dir / f"{prefix}kb_hash.txt"
@@ -221,12 +230,27 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
             "model_details": self.model,
         }
 
+    def _chunking_hash_fields(self) -> list[str]:
+        s = self.semantic_settings
+        return [
+            f"chunking_strategy:{self.chunking_strategy.value}",
+            f"chunking_version:{settings.CHUNKING_VERSION}",
+            f"chunk_size:{self.chunk_size}",
+            f"chunk_overlap:{self.chunk_overlap}",
+            f"model:{settings.EMBEDDING_MODEL}",
+            f"semantic_percentile:{s.breakpoint_percentile}",
+            f"semantic_min:{s.min_chunk_chars}",
+            f"semantic_max:{s.max_chunk_chars}",
+            f"semantic_buffer:{s.buffer_size}",
+        ]
+
     def _compute_kb_hash(self) -> str:
         """Compute a hash of the KB state, including all supported file types."""
         supported_suffixes = {".md", ".pdf", ".txt"}
+        hash_data = self._chunking_hash_fields()
 
         if self._file_sources is not None:
-            hash_data = ["mode:manifest_mf"]
+            hash_data.insert(0, "mode:manifest_mf")
             for logical, path in sorted(self._file_sources, key=lambda x: x[0]):
                 if path.is_file():
                     stat = path.stat()
@@ -235,25 +259,36 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
                     )
                 else:
                     hash_data.append(f"{logical}:missing")
-            hash_data.append(f"chunk_size:{self.chunk_size}")
-            hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
-            hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
             return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
 
         if not self.kb_directory.exists():
             return ""
 
-        hash_data = ["mode:iterdir_mf"]
+        hash_data.insert(0, "mode:iterdir_mf")
         for f in sorted(self.kb_directory.iterdir()):
             if f.is_file() and f.suffix.lower() in supported_suffixes:
                 stat = f.stat()
                 hash_data.append(f"{f.name}:{stat.st_size}:{stat.st_mtime}")
 
-        hash_data.append(f"chunk_size:{self.chunk_size}")
-        hash_data.append(f"chunk_overlap:{self.chunk_overlap}")
-        hash_data.append(f"model:{settings.EMBEDDING_MODEL}")
-
         return hashlib.sha256("|".join(hash_data).encode()).hexdigest()
+
+    def _parse_args_for_strategy(self) -> dict:
+        return {
+            "prechunk": self.chunking_strategy == ChunkingStrategy.LEGACY,
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+        }
+
+    def _chunk_section(self, content: str) -> list[str]:
+        """Split section body using configured chunking strategy."""
+        return chunk_section(
+            content,
+            self.chunking_strategy,
+            model=self.model,
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            semantic_settings=self.semantic_settings,
+        )
 
     def _load_from_cache(self, current_hash: str) -> bool:
         """
@@ -345,7 +380,9 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
                     )
                     continue
                 try:
-                    sections = factory.parse_file(file_path)
+                    sections = factory.parse_file(
+                        file_path, args=self._parse_args_for_strategy()
+                    )
                 except Exception as e:
                     logger.warning(
                         "Failed to parse %s (logical '%s'): %s",
@@ -387,7 +424,9 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
 
         for file_path in all_files:
             try:
-                sections = factory.parse_file(file_path)
+                sections = factory.parse_file(
+                    file_path, args=self._parse_args_for_strategy()
+                )
             except Exception as e:
                 logger.warning(f"Failed to parse {file_path.name}: {e}")
                 continue
@@ -404,82 +443,6 @@ class KnowledgeBaseServiceMultiFormat(KnowledgeBaseService):
                         len(section_chunks) + chunk_index,
                     )
                     self.chunks.append(chunk)
-
-    def _chunk_section(self, content: str) -> list[str]:
-        """
-        Split a section into smaller chunks if needed.
-
-        Strategy:
-        - If section < chunk_size: return as-is
-        - If section > chunk_size: split by paragraphs with overlap
-        """
-        if len(content) <= self.chunk_size:
-            return [content]
-
-        # Split by paragraphs (double newline)
-        paragraphs = re.split(r'\n\s*\n', content)
-
-        chunks = []
-        current_chunk = []
-        current_length = 0
-
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-
-            para_length = len(para)
-
-            # If single paragraph exceeds chunk_size, split by sentences
-            if para_length > self.chunk_size:
-                if current_chunk:
-                    chunks.append('\n\n'.join(current_chunk))
-                    current_chunk = []
-                    current_length = 0
-
-                # Split long paragraph by sentences
-                sentences = re.split(r'(?<=[.!?])\s+', para)
-                temp_chunk = []
-                temp_length = 0
-
-                for sentence in sentences:
-                    if temp_length + len(sentence) > self.chunk_size and temp_chunk:
-                        chunks.append(' '.join(temp_chunk))
-                        # Keep overlap
-                        overlap_sentences = temp_chunk[-2:] if len(
-                            temp_chunk) >= 2 else temp_chunk
-                        temp_chunk = overlap_sentences
-                        temp_length = sum(len(s) for s in temp_chunk)
-
-                    temp_chunk.append(sentence)
-                    temp_length += len(sentence)
-
-                if temp_chunk:
-                    chunks.append(' '.join(temp_chunk))
-
-                continue
-
-            # Add paragraph to current chunk
-            if current_length + para_length > self.chunk_size and current_chunk:
-                chunks.append('\n\n'.join(current_chunk))
-
-                # Add overlap: keep last paragraph
-                if current_chunk:
-                    overlap_text = current_chunk[-1]
-                    current_chunk = [overlap_text]
-                    current_length = len(overlap_text)
-                else:
-                    current_chunk = []
-                    current_length = 0
-
-            current_chunk.append(para)
-            current_length += para_length
-
-        # Add remaining content
-        if current_chunk:
-            chunks.append('\n\n'.join(current_chunk))
-
-        return chunks
 
     def _add_context(self, heading: str, content: str) -> str:
         """

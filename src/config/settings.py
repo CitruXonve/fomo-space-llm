@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,6 +32,14 @@ class Settings(BaseSettings):
     EMBEDDING_CACHE_DIR: str = os.path.join(project_root, '.embedding_cache')
     EMBEDDING_MODEL_CHUNK_SIZE: int = 500
     EMBEDDING_MODEL_CHUNK_OVERLAP: int = 100
+
+    # Chunking strategy (legacy until A/B eval passes; then set to semantic)
+    CHUNKING_STRATEGY: Literal["legacy", "semantic"] = "legacy"
+    CHUNKING_VERSION: str = "1"
+    SEMANTIC_BREAKPOINT_PERCENTILE: float = 95.0
+    SEMANTIC_MIN_CHUNK_CHARS: int = 80
+    SEMANTIC_MAX_CHUNK_CHARS: int = 1200
+    SEMANTIC_BUFFER_SIZE: int = 1
     EMBEDDING_MODEL_BATCH_SIZE: int = 32
     EMBEDDING_MODEL_SHOW_PROGRESS_BAR: bool = True
     EMBEDDING_MODEL_CONVERT_TO_NUMPY: bool = True
