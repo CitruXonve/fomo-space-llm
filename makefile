@@ -76,3 +76,12 @@ start-server-local:
 
 debug-server:
 	fastapi dev src/main.py --reload
+
+collect-linkedin-feed:
+	@poetry run python -m src.utility.linkedin_feed_cli \
+	--user-data-dir .browser_profile --profile-directory Default \
+	--headless --max-posts 25 --scroll-rounds 50
+
+sign-in-linkedin:
+	@poetry run python scripts/linkedin_sign_in.py \
+    --user-data-dir .browser_profile --profile-directory Default

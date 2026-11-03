@@ -272,11 +272,23 @@ vi .env
 # LANGSMITH_PROJECT="[YOUR_LANGSMITH_PROJECT_NAME]"
 ```
 
+## Documentation
+
+| Doc | Description |
+|-----|-------------|
+| [docs/linkedin-feed-access.md](docs/linkedin-feed-access.md) | LinkedIn feed pipeline architecture (live collector vs Crawl4AI A/B), CLI, config, and reliability notes |
+| [docs/browser-use.md](docs/browser-use.md) | Substitution analysis: Browserless / browser-use vs local `BrowserManager` |
+| [docs/browser-remote-view.md](docs/browser-remote-view.md) | Design notes for remote viewing / streaming the server-side Playwright browser (not implemented yet) |
+
 ## Project Structure
 
 ```
 .
 ├── README.md
+├── docs/
+│   ├── linkedin-feed-access.md
+│   ├── browser-use.md
+│   └── browser-remote-view.md
 ├── makefile
 ├── poetry.lock
 ├── pyproject.toml
