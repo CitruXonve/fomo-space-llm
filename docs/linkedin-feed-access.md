@@ -33,12 +33,46 @@ LiveFeedCollector.run()
     → resolve author-only stubs (Send → Copy link)
 ```
 
-Default path (`use_crawl4ai=False`): one locked live Chromium session.
+### Live path (default / production)
 
-Opt-in Crawl4AI (`use_crawl4ai=True`): virtual-scroll HTML snapshot. When
-`resolve_missing_urls=True` and the crawl returns empty, the pipeline falls back
-to the live collector (`crawl4ai+live_fallback`). When crawl returns rows with
-missing `post_url`, a separate live session fills URLs via Send → Copy link.
+`use_crawl4ai=False` — one locked live Chromium session via `LiveFeedCollector`.
+This is the production-oriented collector: prepare → JS extract → HTML scroll
+fallback → Send → Copy link.
+
+### Crawl4AI path (opt-in / A/B)
+
+`use_crawl4ai=True` is the **alternative arm for A/B experiments**, not the
+default production path. It runs Crawl4AI virtual scroll over the same persistent
+profile, then parses the HTML snapshot with the same `parse_feed_posts` /
+quality metrics as live — so you can compare yield and URL quality side by side.
+
+```
+--use-crawl4ai
+  → crawl_linkedin_feed(FeedCollectionOptions)   # virtual scroll HTML
+  → if empty and resolve_missing_urls:
+        LiveFeedCollector (collection_mode=crawl4ai+live_fallback)
+  → else if stubs and resolve_missing_urls:
+        live session: Send → Copy link
+  → dedupe / validate / export (same as live)
+```
+
+| | Live (`use_crawl4ai=False`) | Crawl4AI A/B (`use_crawl4ai=True`) |
+|---|---|---|
+| Engine | Playwright `BrowserManager` | Crawl4AI `AsyncWebCrawler` + virtual scroll |
+| Scroll loop | In-page JS IIFE or Python HTML loop | Crawl4AI `VirtualScrollConfig` |
+| URL resolve | Inline during/after collect | Separate live session when stubs remain |
+| Empty crawl | N/A | Falls back to live when `resolve_missing_urls` |
+| `collection_mode` | `live` | `crawl4ai` or `crawl4ai+live_fallback` |
+| Intent | Production / cron | Experiment / compare against live |
+
+**Caveat:** Crawl4AI often returns an unhydrated LinkedIn shell (few or no real
+cards). Treat empty or low `valid_post_url_ratio` as a signal for the A/B, not
+necessarily a pipeline bug — enable `resolve_missing_urls` (default) so empty
+crawls still produce a live-fallback arm for comparison.
+
+Export `params` record the arm: `use_crawl4ai`, `collection_mode`,
+`browser_fallback_used`, `urls_resolved_count`, sort meta. Compare two exports
+(same `max_posts` / `scroll_rounds` / profile) to judge which collector wins.
 
 ## Module map
 
@@ -103,6 +137,15 @@ Flat kwargs still work (`LinkedInFeedPipeline(user_data_dir=..., ...)`), and
 4. **Resolve**: `wait_for_page_ready` then Send → Copy link via `BrowserManager.safe_evaluate` (retries when Playwright reports execution context destroyed after SPA navigation).
 5. **Dedupe / quality / export**: cap to `max_posts`, compute valid `post_url` stats, write timestamped JSON under the export directory.
 
+## Runtime flow (Crawl4AI A/B path)
+
+1. **Auth** (optional): same as live.
+2. **Collect (Crawl4AI)**: `crawl_linkedin_feed` locks the profile, virtual-scrolls `#workspace`, returns HTML → `parse_feed_posts`.
+3. **Bridge to live when needed** (if `resolve_missing_urls`):
+   - **Empty crawl** → full `LiveFeedCollector` run (`crawl4ai+live_fallback`).
+   - **Partial rows** (author stubs, no `post_url`) → prepare feed page + `resolve_post_urls_via_send_button`.
+4. **Dedupe / quality / export**: same validators and JSON shape as live so arms are comparable.
+
 ## Operational constraints
 
 - Uses `linkedin_profile_lock` under `user_data_dir`. Do not run `LinkedInFeedPipeline`, `LinkedInWebAgent`, and ad-hoc `browser_manager` against the same profile concurrently.
@@ -114,6 +157,8 @@ Flat kwargs still work (`LinkedInFeedPipeline(user_data_dir=..., ...)`), and
 
 ## CLI
 
+**Live (default / production):**
+
 ```bash
 make sign-in-linkedin
 make collect-linkedin-feed
@@ -123,11 +168,22 @@ poetry run python -m src.utility.linkedin_feed_cli \
   --headless --max-posts 25 --scroll-rounds 50
 ```
 
+**Crawl4AI (A/B arm)** — same knobs, add `--use-crawl4ai`:
+
+```bash
+poetry run python -m src.utility.linkedin_feed_cli \
+  --user-data-dir .browser_profile --profile-directory Default \
+  --headless --max-posts 25 --scroll-rounds 50 \
+  --use-crawl4ai
+```
+
 Useful flags: `--no-headless`, `--use-crawl4ai`, `--no-resolve-missing-urls`,
 `--skip-auth-check`, `--no-export`, `--require-activity-id`.
 
 Export files land under `settings.EXPORT_DIRECTORY` (typically `.export/`) as
 `linkedin_feed_<timestamp>.json` with `params`, `posts`, `valid_posts`, `quality`.
+For A/B, compare `quality.valid_post_url_count` / `valid_post_url_ratio` and
+`params.collection_mode` across a live export and a `--use-crawl4ai` export.
 
 ## Reliability notes (known failure mode)
 
