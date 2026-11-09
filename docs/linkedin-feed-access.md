@@ -90,9 +90,12 @@ Export `params` record the arm: `use_crawl4ai`, `collection_mode`,
 | `linkedin_feed_collect.py` | Thin backward-compat facade over collector / prepare / resolve |
 | `linkedin_feed_agent.py` | Shim: `LinkedInFeedAgent = LinkedInFeedPipeline` |
 | `linkedin_feed_cli.py` | CLI entry (`python -m src.utility.linkedin_feed_cli`) |
+| `linkedin_feed_redact.py` | Strip scripts and session tokens from a feed HTML fragment |
+| `firecrawl_linkedin_helper.py` | Local scroll + Firecrawl `/v2/parse` (`collection_mode=firecrawl_parse`) |
+| `linkedin_feed_firecrawl_cli.py` | CLI entry (`python -m src.utility.linkedin_feed_firecrawl_cli`) |
 
 Related: `browser_manager.py` (`safe_evaluate`, `wait_for_page_ready`),
-`linkedin_auth.py`, `makefile` targets `sign-in-linkedin` / `collect-linkedin-feed`.
+`linkedin_auth.py`, `makefile` targets `sign-in-linkedin` / `collect-linkedin-feed` / `collect-linkedin-feed-firecrawl`.
 
 ## Configuration
 
@@ -180,10 +183,22 @@ poetry run python -m src.utility.linkedin_feed_cli \
 Useful flags: `--no-headless`, `--use-crawl4ai`, `--no-resolve-missing-urls`,
 `--skip-auth-check`, `--no-export`, `--require-activity-id`.
 
-Export files land under `settings.EXPORT_DIRECTORY` (typically `.export/`) as
+**Firecrawl parse (A/B arm)** — local Playwright profile, one redacted HTML upload. Does not use Crawl4AI or `/interact`:
+
+```bash
+make collect-linkedin-feed-firecrawl
+# or
+poetry run python -m src.utility.linkedin_feed_firecrawl_cli \
+  --user-data-dir .browser_profile --profile-directory Default \
+  --headless --max-posts 25 --scroll-rounds 50
+```
+
+Requires `FIRECRAWL_API_KEY` in the environment (not application settings). Optional `FIRECRAWL_API_URL` points at a self-hosted API. The arm locks `.linkedin_feed_ab.lock` under the profile directory, scrolls locally, redacts the feed container (scripts, frames, comments, `li_at`, `JSESSIONID`, `ajax:` tokens, emails, and hrefs other than `/feed/update/`, `/posts/`, and `/in/`), then calls `POST /v2/parse` with formats `markdown` and `links` only. Cookies and `localStorage` stay in `.browser_profile`. Export files are `linkedin_feed_firecrawl_<timestamp>.json` with `params.collection_mode` `firecrawl_parse`.
+
+Export files for the live and Crawl4AI arms land under `settings.EXPORT_DIRECTORY` (typically `.export/`) as
 `linkedin_feed_<timestamp>.json` with `params`, `posts`, `valid_posts`, `quality`.
 For A/B, compare `quality.valid_post_url_count` / `valid_post_url_ratio` and
-`params.collection_mode` across a live export and a `--use-crawl4ai` export.
+`params.collection_mode` across a live export, a `--use-crawl4ai` export, and a Firecrawl parse export.
 
 ## Reliability notes (known failure mode)
 

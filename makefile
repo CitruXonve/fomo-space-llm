@@ -82,6 +82,11 @@ collect-linkedin-feed:
 	--user-data-dir .browser_profile --profile-directory Default \
 	--headless --max-posts 25 --scroll-rounds 50
 
+collect-linkedin-feed-firecrawl:
+	@poetry run python -m src.utility.linkedin_feed_firecrawl_cli \
+	--user-data-dir .browser_profile --profile-directory Default \
+	--headless --max-posts 25 --scroll-rounds 50
+
 sign-in-linkedin:
 	@poetry run python scripts/linkedin_sign_in.py \
     --user-data-dir .browser_profile --profile-directory Default
